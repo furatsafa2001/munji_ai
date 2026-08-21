@@ -28,16 +28,24 @@ from .registry import REGISTRY, get
 def patient_of(ds, record_name: str) -> str:
     """Patient id for a record path as listed by PhysioNet.
 
-    Listings may be bare names ('16265') or nested paths ('p00/p00001_s00').
-    Try the registry pattern on the stem first, then fall back to the leading
-    directory, which is how the large patient-partitioned sets are organised.
+    Listings come in several shapes:
+        '16265'                    flat record name
+        'p00/p00001/p00001_s00'    full nested path
+        'p00/p00001/'              directory entry, which is what the large
+                                   patient-partitioned sets actually return
+
+    The patient id is the *deepest* path component that identifies a person,
+    never the shallowest. Icentia buckets patients into 11 top-level folders
+    (p00..p10), so taking the first component collapses 11,000 patients into
+    11 and silently defeats the cap.
     """
-    stem = Path(record_name).name
-    m = re.match(ds.patient_re, stem)
+    clean = record_name.strip().rstrip("/\\")
+    parts = Path(clean).parts
+
+    m = re.match(ds.patient_re, Path(clean).name)
     if m:
         return m.group(1)
-    parts = Path(record_name).parts
-    return parts[0] if len(parts) > 1 else stem
+    return parts[-1] if parts else clean
 
 
 def limited_records(ds, limit: int) -> list[str] | None:
