@@ -48,6 +48,8 @@ def config_hash() -> str:
         "qrs": C.QRS_HALFWIDTH_MS,
         "beat_classes": C.BEAT_CLASSES,
         "purity": [C.RHYTHM_PURITY, C.SHOCKABLE_PURITY],
+        "shockable_rhythms": sorted(C.SHOCKABLE_RHYTHMS),
+        "vt_fast_bpm": C.VT_FAST_BPM,
         "quality_bands": augment.QUALITY_BANDS,
     }, sort_keys=True)
     return hashlib.sha256(payload.encode()).hexdigest()[:12]
@@ -176,11 +178,55 @@ def extract_rhythm(rec: Record, rng, cap: int):
     return X, [c for _, _, c in chosen], [lo for lo, _, _ in chosen]
 
 
-SHOCKABLE = {"VF", "VT"}
+SHOCKABLE = set(C.SHOCKABLE_RHYTHMS)
+
+
+def _episode_bpm(sig, fs: int):
+    """Median heart rate inside one episode, or None if unmeasurable.
+
+    VFDB carries no beat annotations at all, so the rate cannot come from
+    the label file — it has to be measured off the signal. Peaks are taken
+    on the rectified trace because ventricular complexes are often
+    predominantly negative on a single lead.
+    """
+    from scipy.signal import find_peaks
+
+    sig = np.asarray(sig, dtype=np.float64)
+    if len(sig) < fs:
+        return None
+    x = np.abs(sig - np.median(sig))
+    scale = float(np.median(x)) * 1.4826
+    if not np.isfinite(scale) or scale <= 0:
+        return None
+    peaks, _ = find_peaks(x, distance=max(1, int(0.2 * fs)), prominence=2.0 * scale)
+    if len(peaks) < 3:
+        return None
+    rr = np.diff(peaks) / float(fs)
+    rr = rr[rr > 0]
+    if not len(rr):
+        return None
+    return float(60.0 / np.median(rr))
+
+
+def split_vt_by_rate(rec: Record, intervals):
+    """Relabel VT episodes as VT_FAST or VT_SLOW using the measured rate."""
+    out = []
+    for s, e, lab in intervals:
+        if lab != "VT":
+            out.append((s, e, lab))
+            continue
+        bpm = _episode_bpm(rec.signal[s:e], rec.fs)
+        if bpm is None:
+            out.append((s, e, "VT"))
+        elif bpm >= C.VT_FAST_BPM:
+            out.append((s, e, "VT_FAST"))
+        else:
+            out.append((s, e, "VT_SLOW"))
+    return out
 
 
 def extract_shockable(rec: Record, rng, cap: int):
-    iv = rhythm_intervals(rec)
+    iv = split_vt_by_rate(rec, rhythm_intervals(rec))
     if not iv:
         return [], [], []
     pos, neg = [], []

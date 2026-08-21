@@ -167,9 +167,25 @@ def load_record(
             aux = getattr(ann, "aux_note", None)
             if aux:
                 aux = np.asarray([str(a).strip("\x00").strip() for a in aux], dtype=object)
-                rk = np.array([a.startswith("(") for a in aux])
+                rk = np.array(
+                    [a.startswith("(") and "NOISE" not in a.upper() for a in aux]
+                )
                 if rk.any():
                     rhy_s, rhy_y = idx[rk], aux[rk]
+
+            br = np.isin(sym, ["[", "]"])
+            if br.any():
+                br_s = idx[br]
+                br_y = np.array(
+                    ["(VFIB" if s == "[" else "(N" for s in sym[br]], dtype=object
+                )
+                if len(rhy_s):
+                    merged_s = np.concatenate([rhy_s, br_s])
+                    merged_y = np.concatenate([rhy_y, br_y])
+                    order = np.argsort(merged_s, kind="stable")
+                    rhy_s, rhy_y = merged_s[order], merged_y[order]
+                else:
+                    rhy_s, rhy_y = br_s, br_y
             break
 
     return Record(

@@ -85,6 +85,18 @@ SHOCKABLE_PURITY = 0.5
 
 RHYTHM_CLASSES = ("NSR", "AF", "OTHER")
 SHOCKABLE_CLASSES = ("not_shockable", "shockable")
+
+# Which rhythm labels count as shockable.
+#
+# VFL is mapped to VF upstream, so "VF" covers fibrillation and flutter.
+# VT is split by measured rate rather than taken as one class: only rapid VT
+# is shockable, slow VT is treated medically. The annotations carry no rate,
+# so it is derived from RR intervals inside each episode — see
+# windows.split_vt_by_rate. An episode whose rate cannot be measured stays
+# "VT" and is excluded, which is the conservative side for a false alarm but
+# not for a miss; those episodes are worth inspecting rather than ignoring.
+SHOCKABLE_RHYTHMS = ("VF", "VT_FAST")
+VT_FAST_BPM = 150.0
 QUALITY_CLASSES = ("good", "qrs_only", "unusable")
 
 # ---------------------------------------------------------------- cache limits
