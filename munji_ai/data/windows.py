@@ -277,14 +277,29 @@ EXTRACTORS = {"beat": extract_beat, "rhythm": extract_rhythm,
 
 
 def build_stage(stage: str, manifest: dict, out_dir: Path | None = None,
-                seed: int = 0, verbose: bool = True) -> dict[str, Path]:
-    """Build train/val/test caches for one stage."""
+                raw_dir: Path | None = None, seed: int = 0,
+                verbose: bool = True) -> dict[str, Path]:
+    """Build train/val/test caches for one stage.
+
+    `raw_dir` must be threaded through to both the noise loader and the record
+    iterator. Defaulting either of them to config silently reads from the wrong
+    disk when raw data lives on external storage.
+    """
     from .registry import by_stage
 
     out_dir = Path(out_dir or C.CACHE_DIR)
+    raw_dir = Path(raw_dir or C.RAW_DIR)
     out_dir.mkdir(parents=True, exist_ok=True)
-    datasets = [d.key for d in by_stage(stage)]
-    noises = augment.load_noise() if stage == "quality" else None
+    # Only build from datasets that are actually downloaded — a registered but
+    # absent benchmark (challenge2011) should not abort the whole build.
+    present = {e["dataset"] for e in manifest.values()}
+    datasets = [d.key for d in by_stage(stage) if d.key in present]
+    if not datasets:
+        raise FileNotFoundError(
+            f"no downloaded datasets feed stage {stage!r}. Expected any of "
+            f"{[d.key for d in by_stage(stage)]}"
+        )
+    noises = augment.load_noise(raw_dir) if stage == "quality" else None
     cap = C.MAX_WINDOWS_PER_PATIENT[stage]
     written: dict[str, Path] = {}
 
@@ -308,7 +323,7 @@ def build_stage(stage: str, manifest: dict, out_dir: Path | None = None,
 
             names = [e["record"] for e in items]
             lookup = {e["record"]: e for e in items}
-            for rec in iter_records(ds_key, names=names):
+            for rec in iter_records(ds_key, root=raw_dir, names=names):
                 if len(X) >= budget:
                     break
                 rng = np.random.default_rng(abs(hash((seed, rec.patient))) % 2**32)

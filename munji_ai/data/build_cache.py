@@ -66,7 +66,7 @@ def main(argv=None) -> int:
             print(f"\n[{stage}] skipped — needs any of {need}")
             continue
         print(f"\n[{stage}] building (sources: {', '.join(need)})")
-        build_stage(stage, manifest, out_dir=a.cache)
+        build_stage(stage, manifest, out_dir=a.cache, raw_dir=a.raw)
 
     print(f"\ndone. caches in {a.cache}")
     return 0
