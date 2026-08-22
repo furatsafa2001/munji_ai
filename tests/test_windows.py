@@ -77,6 +77,30 @@ def main():
     check("50/50 boundary window rejected as ambiguous", boundary is None,
           f"got {boundary!r}")
 
+    print("\n4b. ambiguity markers are dropped, not relabelled")
+    # The failure this guards against: intervals run until the next marker, so
+    # deleting a (NOISE annotation makes the preceding rhythm extend across the
+    # unreadable stretch and mislabel it.
+    iv2 = [(0, 1000, "NSR"), (1000, 2000, "NOISE"), (2000, 3000, "AF"),
+           (3000, 4000, "UNKNOWN"), (4000, 5000, "VT")]
+    check("clean NSR window still labelled",
+          W.dominant_label(iv2, 0, 1000, 0.7, C.AMBIGUOUS_RHYTHMS) == "NSR")
+    check("noise window dropped, not called NSR",
+          W.dominant_label(iv2, 1000, 2000, 0.7, C.AMBIGUOUS_RHYTHMS) is None)
+    check("post-VF unknown dropped, not called NSR",
+          W.dominant_label(iv2, 3000, 4000, 0.7, C.AMBIGUOUS_RHYTHMS) is None)
+    check("VT kept for the rhythm stage",
+          W.dominant_label(iv2, 4000, 5000, 0.5, C.AMBIGUOUS_RHYTHMS) == "VT")
+    check("unmeasurable VT dropped from the shockable stage",
+          W.dominant_label(iv2, 4000, 5000, 0.5, C.SHOCKABLE_EXCLUDED) is None)
+
+    print("\n4c. bracket close maps to unknown, never to sinus")
+    from munji_ai.data.loader import RHYTHM_MAP
+    check("(UNKNOWN is a known token", RHYTHM_MAP.get("(UNKNOWN") == "UNKNOWN")
+    check("(NOISE is a known token", RHYTHM_MAP.get("(NOISE") == "NOISE")
+    check("both are in the ambiguous set",
+          {"NOISE", "UNKNOWN"} <= set(C.AMBIGUOUS_RHYTHMS))
+
     print("\n5. beat extraction")
     rng = np.random.default_rng(0)
     X, Y, off = W.extract_beat(rec, rng, cap=150)
@@ -103,11 +127,13 @@ def main():
 
     print("\n7. shockable extraction")
     vf = make_record(seconds=200, af_from=None, seed=3)
-    vf.rhythm_starts = np.array([0, 100 * 250], dtype=np.int64)
-    vf.rhythm_labels = np.array(["(N", "(VFIB"], dtype=object)
+    vf.rhythm_starts = np.array([0, 100 * 250, 150 * 250], dtype=np.int64)
+    vf.rhythm_labels = np.array(["(N", "(VFIB", "(UNKNOWN"], dtype=object)
     Xs, Ys, _ = W.extract_shockable(vf, rng, cap=400)
     counts = dict(zip(*np.unique(Ys, return_counts=True)))
     check("both classes present", len(counts) == 2, str(counts))
+    check("no window carries an ambiguity marker",
+          not (set(counts) & set(C.AMBIGUOUS_RHYTHMS)), str(set(counts)))
     check("shape correct", Xs[0].shape == (C.window_samples("shockable"),))
 
     print("\n8. quality extraction")

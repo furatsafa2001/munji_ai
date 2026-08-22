@@ -97,6 +97,23 @@ SHOCKABLE_CLASSES = ("not_shockable", "shockable")
 # not for a miss; those episodes are worth inspecting rather than ignoring.
 SHOCKABLE_RHYTHMS = ("VF", "VT_FAST")
 VT_FAST_BPM = 150.0
+
+# Labels that mark ambiguity rather than a rhythm. A window dominated by one of
+# these is dropped, never assigned to a class.
+#
+# NOISE   the original annotators marked this stretch unreadable. Deleting the
+#         annotation is worse than keeping it: intervals run until the next
+#         marker, so removing NOISE makes the preceding rhythm extend across it
+#         and unreadable signal gets labelled as that rhythm.
+# UNKNOWN whatever follows a ventricular fibrillation episode. Often asystole,
+#         VT, or defibrillation artifact — asserting sinus rhythm there teaches
+#         the model that a still-dangerous rhythm is safe.
+AMBIGUOUS_RHYTHMS = ("NOISE", "UNKNOWN")
+
+# Excluded from the shockable stage on top of the above: VT whose rate could
+# not be measured. Neither shockable nor safe — unknown. Labelling it
+# not_shockable is the wrong side of the miss/false-alarm trade.
+SHOCKABLE_EXCLUDED = AMBIGUOUS_RHYTHMS + ("VT",)
 QUALITY_CLASSES = ("good", "qrs_only", "unusable")
 
 # ---------------------------------------------------------------- cache limits

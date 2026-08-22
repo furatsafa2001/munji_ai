@@ -50,6 +50,8 @@ def config_hash() -> str:
         "purity": [C.RHYTHM_PURITY, C.SHOCKABLE_PURITY],
         "shockable_rhythms": sorted(C.SHOCKABLE_RHYTHMS),
         "vt_fast_bpm": C.VT_FAST_BPM,
+        "ambiguous": sorted(C.AMBIGUOUS_RHYTHMS),
+        "shockable_excluded": sorted(C.SHOCKABLE_EXCLUDED),
         "quality_bands": augment.QUALITY_BANDS,
     }, sort_keys=True)
     return hashlib.sha256(payload.encode()).hexdigest()[:12]
@@ -97,8 +99,15 @@ def rhythm_intervals(rec: Record) -> list[tuple[int, int, str]]:
     return [(int(s), int(e), str(l)) for s, e, l in zip(starts, ends, labels) if e > s]
 
 
-def dominant_label(intervals, lo: int, hi: int, purity: float) -> str | None:
-    """Label covering at least `purity` of [lo, hi); otherwise None (ambiguous)."""
+def dominant_label(intervals, lo: int, hi: int, purity: float,
+                   excluded=()) -> str | None:
+    """Label covering at least `purity` of [lo, hi); otherwise None.
+
+    `excluded` names labels that mean "we do not know", not a rhythm. A window
+    dominated by one of them returns None and is dropped rather than assigned
+    to a class. Assigning it would be worse than discarding it: in an alerting
+    system, ambiguity labelled 'safe' is a miss waiting to happen.
+    """
     if not intervals:
         return None
     span = hi - lo
@@ -110,6 +119,8 @@ def dominant_label(intervals, lo: int, hi: int, purity: float) -> str | None:
     if not cover:
         return None
     lab, amount = cover.most_common(1)[0]
+    if lab in excluded:
+        return None
     return lab if amount / span >= purity else None
 
 
@@ -162,7 +173,8 @@ def extract_rhythm(rec: Record, rng, cap: int):
         return [], [], []
     pos, neg = [], []
     for lo, hi in _frames(rec, "rhythm"):
-        lab = dominant_label(iv, lo, hi, C.RHYTHM_PURITY)
+        lab = dominant_label(iv, lo, hi, C.RHYTHM_PURITY,
+                             excluded=C.AMBIGUOUS_RHYTHMS)
         if lab is None:
             continue
         cls = lab if lab in C.RHYTHM_CLASSES else ("AF" if lab == "AFL" else "OTHER")
@@ -231,7 +243,8 @@ def extract_shockable(rec: Record, rng, cap: int):
         return [], [], []
     pos, neg = [], []
     for lo, hi in _frames(rec, "shockable"):
-        lab = dominant_label(iv, lo, hi, C.SHOCKABLE_PURITY)
+        lab = dominant_label(iv, lo, hi, C.SHOCKABLE_PURITY,
+                             excluded=C.SHOCKABLE_EXCLUDED)
         if lab is None:
             continue
         cls = "shockable" if lab in SHOCKABLE else "not_shockable"
@@ -323,18 +336,30 @@ def build_stage(stage: str, manifest: dict, out_dir: Path | None = None,
 
             names = [e["record"] for e in items]
             lookup = {e["record"]: e for e in items}
+            # Share each patient's budget across their records. Giving every
+            # record the full cap lets a patient with 50 segments contribute
+            # 50x what a single-record patient does; spending it all on the
+            # first record would take every window from one stretch of signal.
+            per_patient = Counter(e["patient"] for e in items)
+            spent: Counter = Counter()
             for rec in iter_records(ds_key, root=raw_dir, names=names):
                 if len(X) >= budget:
                     break
+                n_rec = max(per_patient[rec.patient], 1)
+                room_pat = cap - spent[rec.patient]
+                if room_pat <= 0:
+                    continue
+                per_rec = max(1, min(room_pat, cap // n_rec))
                 rng = np.random.default_rng(abs(hash((seed, rec.patient))) % 2**32)
                 fn = EXTRACTORS[stage]
-                out = (fn(rec, rng, cap, noises) if stage == "quality"
-                       else fn(rec, rng, cap))
+                out = (fn(rec, rng, per_rec, noises) if stage == "quality"
+                       else fn(rec, rng, per_rec))
                 xs, ys, offs = out
                 room = budget - len(X)
                 xs, ys, offs = xs[:room], ys[:room], offs[:room]
                 X.extend(xs)
                 Y.extend(ys)
+                spent[rec.patient] += len(xs)
                 e = lookup[rec.name]
                 meta_ds += [ds_key] * len(xs)
                 meta_pat += [e["patient"]] * len(xs)

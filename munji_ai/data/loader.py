@@ -53,6 +53,9 @@ RHYTHM_MAP = {
     "(VT": "VT", "(VFL": "VF", "(VFIB": "VF",
     "(B": "BIGEMINY", "(T": "TRIGEMINY",
     "(P": "PACED", "(AB": "OTHER", "(IVR": "OTHER", "(NOD": "OTHER",
+    # Ambiguity markers, not rhythms. Kept as intervals so they occupy their
+    # own span; windows dominated by them are dropped downstream.
+    "(NOISE": "NOISE", "(UNKNOWN": "UNKNOWN",
 }
 
 
@@ -167,17 +170,24 @@ def load_record(
             aux = getattr(ann, "aux_note", None)
             if aux:
                 aux = np.asarray([str(a).strip("\x00").strip() for a in aux], dtype=object)
-                rk = np.array(
-                    [a.startswith("(") and "NOISE" not in a.upper() for a in aux]
-                )
+                # (NOISE is kept, not filtered. Intervals run until the
+                # next marker, so dropping it here would make the preceding
+                # rhythm extend across unreadable signal and mislabel it.
+                rk = np.array([a.startswith("(") for a in aux])
                 if rk.any():
                     rhy_s, rhy_y = idx[rk], aux[rk]
 
             br = np.isin(sym, ["[", "]"])
             if br.any():
                 br_s = idx[br]
+                # '[' opens a ventricular fibrillation / flutter episode.
+                # ']' closes it, but says nothing about what follows — often
+                # asystole, VT, or defibrillation artifact. Calling it sinus
+                # rhythm would label a dangerous stretch as safe, so it becomes
+                # an explicit unknown and those windows are dropped.
                 br_y = np.array(
-                    ["(VFIB" if s == "[" else "(N" for s in sym[br]], dtype=object
+                    ["(VFIB" if s == "[" else "(UNKNOWN" for s in sym[br]],
+                    dtype=object,
                 )
                 if len(rhy_s):
                     merged_s = np.concatenate([rhy_s, br_s])
