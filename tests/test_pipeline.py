@@ -113,8 +113,11 @@ def main():
               f"measured {got:.2f} dB -> {augment.quality_from_snr(got)}")
 
     X, yq, snr = augment.make_quality_set(clean[:80], fake, seed=2)
-    dist = {k: int((yq == k).sum()) for k in ("good", "qrs_only", "unusable")}
-    check("quality set covers all three classes", all(v > 0 for v in dist.values()), str(dist))
+    dist = {k: int((yq == k).sum()) for k in C.QUALITY_CLASSES}
+    check("quality set covers every class", all(v > 0 for v in dist.values()), str(dist))
+    check("labels agree with the injected SNR",
+          all(augment.quality_from_snr(s) == l
+              for s, l in zip(snr, yq) if np.isfinite(s)))
 
     print("\n7. lead-off simulation")
     lo_sig = augment.simulate_lead_off(ym[:5000], rng=rng)

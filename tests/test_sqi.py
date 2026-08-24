@@ -115,6 +115,20 @@ def main():
     except ImportError:
         check("scikit-learn available", False, "pip install scikit-learn")
 
+    print("\n6b. graded score gives distinct operating points")
+    # The detail the old qrs_only class carried now lives in P(usable): a
+    # strict threshold for morphology, a permissive one for rhythm timing.
+    yt = np.array(["usable"] * 70 + ["unusable"] * 30)
+    pu = np.concatenate([rng.uniform(0.55, 1.0, 70), rng.uniform(0.0, 0.7, 30)])
+    sc = M.gate_views_scored(yt, pu)
+    check("both operating points reported", set(sc) == set(C.GATE_MIN_P), str(set(sc)))
+    check("permissive point passes more windows",
+          sc["rhythm"]["pass_rate"] > sc["morphology"]["pass_rate"],
+          f"rhythm {sc['rhythm']['pass_rate']:.2f} vs "
+          f"morphology {sc['morphology']['pass_rate']:.2f}")
+    check("strict point rejects more",
+          sc["morphology"]["sensitivity"] >= sc["rhythm"]["sensitivity"])
+
     print("\n7. rhythm bias detector — the critical audit")
     n = 600
     src = np.array(["nsrdb"] * 300 + ["ltafdb"] * 200 + ["cudb"] * 100)

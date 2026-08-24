@@ -52,6 +52,7 @@ def config_hash() -> str:
         "vt_fast_bpm": C.VT_FAST_BPM,
         "ambiguous": sorted(C.AMBIGUOUS_RHYTHMS),
         "shockable_excluded": sorted(C.SHOCKABLE_EXCLUDED),
+        "quality_classes": sorted(C.QUALITY_CLASSES),
         "quality_bands": augment.QUALITY_BANDS,
     }, sort_keys=True)
     return hashlib.sha256(payload.encode()).hexdigest()[:12]
@@ -274,7 +275,7 @@ def extract_quality(rec: Record, rng, cap: int, noises: dict):
         w = frames[i]
         if rng.random() < 0.30:
             X.append(pp.normalize(w))
-            Y.append("good")
+            Y.append("usable")
         else:
             noisy, _, lab = augment.augment_window(w, noises, rng)
             X.append(pp.normalize(noisy))

@@ -90,19 +90,35 @@ def _binary(y_true, y_pred, positive: set[str]) -> dict[str, float]:
 
 
 def gate_views(y_true, y_pred) -> dict[str, dict]:
-    """The gate is not one binary decision — downstream consumers differ.
+    """The gate's headline view: is 'unusable' correctly identified.
 
-    morphology  the beat classifier needs clean waveform shape, so only
-                'good' may pass
-    rhythm      the rule engine needs R-peak timing only, so 'qrs_only'
-                is acceptable
-    reject      the headline view: is 'unusable' correctly identified
+    With two classes there is only one hard decision. The finer distinction
+    downstream stages need comes from thresholding P(usable) at different
+    points (see config.GATE_MIN_P), not from a third label — see
+    gate_views_scored for that.
     """
-    return {
-        "reject": _binary(y_true, y_pred, {"unusable"}),
-        "morphology_usable": _binary(y_true, y_pred, {"good"}),
-        "rhythm_usable": _binary(y_true, y_pred, {"good", "qrs_only"}),
-    }
+    return {"reject": _binary(y_true, y_pred, {"unusable"})}
+
+
+def gate_views_scored(y_true, p_usable, thresholds=None) -> dict[str, dict]:
+    """Scores at each downstream operating point.
+
+    One model, several thresholds. The beat classifier wants clean morphology
+    and so sets a high bar; the rule engine only needs R-peak timing and can
+    accept more. Reporting both makes the trade explicit instead of burying it
+    in a class definition.
+    """
+    from ..config import GATE_MIN_P
+
+    p = np.asarray(p_usable, dtype=float)
+    out = {}
+    for name, thr in (thresholds or GATE_MIN_P).items():
+        pred = np.where(p >= thr, "usable", "unusable")
+        s = _binary(y_true, pred, {"unusable"})
+        s["threshold"] = thr
+        s["pass_rate"] = float((pred == "usable").mean())
+        out[name] = s
+    return out
 
 
 def passes_target(y_true, y_pred, target: dict | None = None) -> tuple[bool, dict]:

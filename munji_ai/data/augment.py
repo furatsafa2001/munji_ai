@@ -22,7 +22,10 @@ from .registry import NOISE_RECORDS
 
 # SNR thresholds mapping to the three-class quality scheme. Chosen so the
 # middle band corresponds to "R peaks still findable, morphology unreliable".
-QUALITY_BANDS = {"good": 12.0, "qrs_only": 3.0}  # dB, lower bound of each class
+# One boundary, in dB. Below it the QRS is no longer recoverable, which is the
+# only quality distinction the signal actually supports. The old two-boundary
+# scheme also defined a 12 dB "good" line; it was measured and dropped.
+QUALITY_BANDS = {"usable": 3.0}
 
 
 def load_noise(root=RAW_DIR, kinds=NOISE_RECORDS) -> dict[str, np.ndarray]:
@@ -72,11 +75,8 @@ def mix(clean: np.ndarray, noise: np.ndarray, snr_db: float,
 
 
 def quality_from_snr(snr_db: float) -> str:
-    if snr_db >= QUALITY_BANDS["good"]:
-        return "good"
-    if snr_db >= QUALITY_BANDS["qrs_only"]:
-        return "qrs_only"
-    return "unusable"
+    """Label from the injected SNR. Exact, because the SNR was chosen."""
+    return "usable" if snr_db >= QUALITY_BANDS["usable"] else "unusable"
 
 
 def augment_window(
@@ -108,14 +108,14 @@ def make_quality_set(
     for w in windows:
         if rng.random() < clean_fraction:
             X.append(np.asarray(w, dtype=np.float64))
-            y.append("good")
+            y.append("usable")
             snrs.append(np.inf)
         else:
             noisy, snr, label = augment_window(w, noises, rng)
             X.append(noisy)
             y.append(label)
             snrs.append(snr)
-    return np.asarray(X), np.asarray(y, dtype="<U9"), np.asarray(snrs)
+    return np.asarray(X), np.asarray(y, dtype="<U8"), np.asarray(snrs)
 
 
 def simulate_lead_off(x: np.ndarray, fs: int = TARGET_FS,
