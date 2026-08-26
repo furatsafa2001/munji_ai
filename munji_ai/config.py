@@ -39,13 +39,18 @@ FILTER_ORDER = 4
 # Length in seconds per pipeline stage. Rationale in the detection matrix.
 WINDOW_SEC = {
     "quality": 5.0,     # signal quality gate
-    "beat": 8.0,        # beat classifier (PVC / PAC)
+    # 20 s, matching Sensors 2026 (MDPI 26/2/513), whose 1D U-Net reports
+    # QRS sensitivity and precision up to 0.999 on this window length. Judging
+    # a beat "premature" needs the surrounding rhythm, not just the complex, so
+    # a longer window carries information a shorter one cannot. Segmentation
+    # also wastes less at the edges: one boundary per 20 s instead of per 8 s.
+    "beat": 20.0,       # beat classifier (PVC / PAC), per the reference paper
     "rhythm": 30.0,     # AF — needs enough RR intervals to judge irregularity
     "shockable": 5.0,   # VF / wide-complex, per EC57 convention
 }
 WINDOW_STRIDE_SEC = {
     "quality": 5.0,
-    "beat": 4.0,        # 50% overlap — beats near edges get a second chance
+    "beat": 10.0,       # 50% overlap — beats near edges get a second chance
     "rhythm": 15.0,
     "shockable": 2.5,
 }
@@ -134,7 +139,11 @@ GATE_MIN_P = {"morphology": 0.90, "rhythm": 0.60}
 # is class balance, not volume.
 SAMPLE_PATIENTS = {"icentia11k": 2000}
 MAX_WINDOWS_PER_PATIENT = {"quality": 60, "beat": 150, "rhythm": 80, "shockable": 400}
-MAX_WINDOWS_PER_STAGE = {"quality": 120_000, "beat": 300_000,
+# Ceiling per stage, sized so the cache stays loadable in memory. Beat windows
+# are 20 s rather than 5 s, so the same count costs four times as much — 300k
+# would be 4.5 GB. These are guardrails, not targets: 235 patients at 150
+# windows each comes to ~35k, well under.
+MAX_WINDOWS_PER_STAGE = {"quality": 120_000, "beat": 150_000,
                          "rhythm": 150_000, "shockable": 120_000}
 # Share of retained windows allowed to contain no ectopic beat / no episode.
 NEGATIVE_KEEP_RATE = {"beat": 0.15, "rhythm": 0.35, "shockable": 0.5}

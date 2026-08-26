@@ -74,9 +74,19 @@ def per_class(y_true, y_pred, labels: list[str]) -> dict[str, dict]:
 
 
 def macro_f1(y_true, y_pred, labels: list[str]) -> float:
-    f1s = [v["f1"] for v in per_class(y_true, y_pred, labels).values()]
-    f1s = [f for f in f1s if not np.isnan(f)]
-    return float(np.mean(f1s)) if f1s else float("nan")
+    """Unweighted mean F1 across classes.
+
+    A class that exists in the data but is never predicted scores 0, not nan.
+    Dropping it instead would reward exactly the degenerate model this metric
+    is meant to catch: predict the majority class for everything, watch the
+    minority class produce an undefined F1, and average only the good one.
+    """
+    scores = []
+    for v in per_class(y_true, y_pred, labels).values():
+        if v["support"] == 0:
+            continue                      # class absent from this split
+        scores.append(0.0 if np.isnan(v["f1"]) else v["f1"])
+    return float(np.mean(scores)) if scores else float("nan")
 
 
 # ---------------------------------------------------------------- gate views
