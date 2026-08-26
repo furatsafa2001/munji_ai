@@ -196,6 +196,23 @@ def load_record(
                     rhy_s, rhy_y = merged_s[order], merged_y[order]
                 else:
                     rhy_s, rhy_y = br_s, br_y
+
+                # Without an aux_note timeline the first marker is a '[', so
+                # everything before the first episode would carry no label and
+                # be dropped — leaving cudb with positives only. The stretch
+                # before a first fibrillation onset is by definition not
+                # fibrillation, so it is valid negative material.
+                if len(rhy_s) and rhy_s[0] > 0:
+                    rhy_s = np.concatenate([[0], rhy_s])
+                    rhy_y = np.concatenate([["(N"], rhy_y])
+
+            # No rhythm markers anywhere means the annotations declare no
+            # change, not that the rhythm is unknown. For a set registered
+            # with a baseline that is a positive statement about the whole
+            # record; for every other set it stays empty and nothing happens.
+            if not len(rhy_s) and ds.baseline_rhythm:
+                rhy_s = np.array([0], dtype=np.int64)
+                rhy_y = np.array([ds.baseline_rhythm], dtype=object)
             break
 
     return Record(

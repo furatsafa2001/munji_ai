@@ -156,7 +156,7 @@ def extract_beat(rec: Record, rng, cap: int):
     rng.shuffle(neg)
     n_neg = min(len(neg), int(len(pos) * C.NEGATIVE_KEEP_RATE["beat"] /
                              max(1 - C.NEGATIVE_KEEP_RATE["beat"], 1e-6)))
-    chosen = pos + neg[:n_neg] if pos else neg[: cap // 4]
+    chosen = pos + neg[:n_neg] if pos else neg[: max(1, cap // 4)]
     rng.shuffle(chosen)
     chosen = chosen[:cap]
 
@@ -182,7 +182,8 @@ def extract_rhythm(rec: Record, rng, cap: int):
         (pos if cls == "AF" else neg).append((lo, hi, cls))
 
     rng.shuffle(neg)
-    n_neg = min(len(neg), max(int(len(pos) * 1.5), cap // 4)) if pos else cap // 4
+    n_neg = (min(len(neg), max(int(len(pos) * 1.5), max(1, cap // 4)))
+             if pos else max(1, cap // 4))
     chosen = pos + neg[:n_neg]
     rng.shuffle(chosen)
     chosen = chosen[:cap]
@@ -252,7 +253,7 @@ def extract_shockable(rec: Record, rng, cap: int):
         (pos if cls == "shockable" else neg).append((lo, hi, cls))
 
     rng.shuffle(neg)
-    chosen = pos + neg[: max(len(pos), cap // 4)]
+    chosen = pos + neg[: max(len(pos), 1, cap // 4)]
     rng.shuffle(chosen)
     chosen = chosen[:cap]
 

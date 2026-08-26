@@ -33,6 +33,12 @@ class Dataset:
     # position); picking index 0 would silently give a limb lead instead.
     channel_names: tuple = field(default_factory=tuple)
     verified: bool = True      # False = record layout needs checking on download
+    # Rhythm that holds for an entire record when the annotations declare no
+    # changes. NSRDB subjects were screened for having no significant
+    # arrhythmia, so its files carry beat labels and no rhythm markers at all —
+    # without this the loader finds no intervals and the set contributes
+    # nothing. Leave empty for any set where the rhythm actually varies.
+    baseline_rhythm: str = ""
     note: str = ""
 
 
@@ -70,6 +76,7 @@ REGISTRY: dict[str, Dataset] = {
         fs=128, channel=0, role="train", labels="rhythm",
         patient_re=r"^(\d+)$",
         stages=("quality", "rhythm"),
+        baseline_rhythm="(N",
         note="Clean normal sinus rhythm. Primary carrier for synthesised quality "
              "labels, but never the only one — see ltafdb.",
     ),
