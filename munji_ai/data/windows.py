@@ -53,6 +53,7 @@ def config_hash() -> str:
         "ambiguous": sorted(C.AMBIGUOUS_RHYTHMS),
         "shockable_excluded": sorted(C.SHOCKABLE_EXCLUDED),
         "quality_classes": sorted(C.QUALITY_CLASSES),
+        "records_per_patient": C.MAX_RECORDS_PER_PATIENT,
         "quality_bands": augment.QUALITY_BANDS,
     }, sort_keys=True)
     return hashlib.sha256(payload.encode()).hexdigest()[:12]
@@ -335,6 +336,21 @@ def build_stage(stage: str, manifest: dict, out_dir: Path | None = None,
                 rng0 = np.random.default_rng(C.SPLIT_SEED)
                 keep = set(rng0.permutation(pats)[:limit])
                 items = [e for e in items if e["patient"] in keep]
+
+            # Keep only a few records per patient. Chosen by a stable hash of
+            # the record name rather than the first N, so the sample is spread
+            # across the recording instead of clustering at its start — every
+            # patient would otherwise be sampled from the same part of their day.
+            rec_cap = C.MAX_RECORDS_PER_PATIENT.get(stage)
+            if rec_cap:
+                grouped: dict[str, list] = {}
+                for e in items:
+                    grouped.setdefault(e["patient"], []).append(e)
+                items = []
+                for pid, recs in grouped.items():
+                    recs.sort(key=lambda e: hashlib.sha256(
+                        f"{C.SPLIT_SEED}:{e['record']}".encode()).hexdigest())
+                    items.extend(recs[:rec_cap])
 
             names = [e["record"] for e in items]
             lookup = {e["record"]: e for e in items}

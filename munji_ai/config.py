@@ -139,6 +139,14 @@ GATE_MIN_P = {"morphology": 0.90, "rhythm": 0.60}
 # is class balance, not volume.
 SAMPLE_PATIENTS = {"icentia11k": 2000}
 MAX_WINDOWS_PER_PATIENT = {"quality": 60, "beat": 150, "rhythm": 80, "shockable": 400}
+
+# How many of a patient's records to read at all. Icentia holds ~50 segments per
+# patient; reading every one to take 3 windows from each wastes almost all of
+# the time in loading and filtering. Ten segments still span roughly 12 hours,
+# and the build runs five times faster.
+#
+# Datasets with a single record per patient are unaffected.
+MAX_RECORDS_PER_PATIENT = {"quality": 6, "beat": 10, "rhythm": 8, "shockable": 50}
 # Ceiling per stage, sized so the cache stays loadable in memory. Beat windows
 # are 20 s rather than 5 s, so the same count costs four times as much — 300k
 # would be 4.5 GB. These are guardrails, not targets: 235 patients at 150
