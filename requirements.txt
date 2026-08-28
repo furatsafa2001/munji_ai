@@ -2,3 +2,4 @@ numpy>=1.24
 scipy>=1.10
 wfdb>=4.1
 scikit-learn>=1.3
+torch>=2.0
