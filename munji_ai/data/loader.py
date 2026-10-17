@@ -7,6 +7,7 @@ change to `registry.py` alone.
 
 from __future__ import annotations
 
+import csv
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -53,6 +54,10 @@ RHYTHM_MAP = {
     "(VT": "VT", "(VFL": "VF", "(VFIB": "VF",
     "(B": "BIGEMINY", "(T": "TRIGEMINY",
     "(P": "PACED", "(AB": "OTHER", "(IVR": "OTHER", "(NOD": "OTHER",
+    # Generic marker for a set that labels "some other rhythm" without naming
+    # it, as CinC 2017 does. Mapping those onto a named token such as (AB
+    # would assert a diagnosis the source never made.
+    "(OTHER": "OTHER",
     # Ambiguity markers, not rhythms. Kept as intervals so they occupy their
     # own span; windows dominated by them are dropped downstream.
     "(NOISE": "NOISE", "(UNKNOWN": "UNKNOWN",
@@ -72,6 +77,38 @@ def _patient_id(ds: Dataset, record: str) -> str:
 
 def dataset_dir(ds: Dataset, root: Path = RAW_DIR) -> Path:
     return Path(root) / ds.key
+
+
+# Per-record labels read from a CSV, cached per dataset so the file is parsed
+# once rather than for every record in it.
+_LABEL_CACHE: dict[tuple, dict] = {}
+
+
+def _record_label(ds: Dataset, name: str, root: Path) -> str:
+    """Rhythm token for one record, from the dataset's label CSV.
+
+    The first column may carry a directory prefix (CinC 2017 writes
+    "A00/A00001"), so records are indexed by their basename. An unmapped or
+    missing label returns "", and the caller leaves the record without rhythm
+    intervals - it then contributes nothing, which is the right outcome for a
+    label we cannot interpret.
+    """
+    key = (ds.key, str(root))
+    if key not in _LABEL_CACHE:
+        path = dataset_dir(ds, root) / ds.label_file
+        table: dict[str, str] = {}
+        if path.exists():
+            mapping = dict(ds.label_map)
+            with open(path, newline="", encoding="utf-8") as fh:
+                for row in csv.reader(fh):
+                    if len(row) < 2:
+                        continue
+                    rec = row[0].strip().split("/")[-1]
+                    token = mapping.get(row[1].strip(), "")
+                    if token:
+                        table[rec] = token
+        _LABEL_CACHE[key] = table
+    return _LABEL_CACHE[key].get(name, "")
 
 
 def _pick_channel(ds: Dataset, rec) -> int:
@@ -210,6 +247,12 @@ def load_record(
             # change, not that the rhythm is unknown. For a set registered
             # with a baseline that is a positive statement about the whole
             # record; for every other set it stays empty and nothing happens.
+            if not len(rhy_s) and ds.label_file:
+                # One label for the whole recording, from the dataset's CSV.
+                token = _record_label(ds, name, root)
+                if token:
+                    rhy_s = np.array([0], dtype=np.int64)
+                    rhy_y = np.array([token], dtype=object)
             if not len(rhy_s) and ds.baseline_rhythm:
                 rhy_s = np.array([0], dtype=np.int64)
                 rhy_y = np.array([ds.baseline_rhythm], dtype=object)

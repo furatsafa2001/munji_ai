@@ -39,11 +39,51 @@ class Dataset:
     # without this the loader finds no intervals and the set contributes
     # nothing. Leave empty for any set where the rhythm actually varies.
     baseline_rhythm: str = ""
+    # Per-record labels held in a CSV beside the data, rather than in .atr
+    # files. CinC 2017 ships one label per recording this way, and
+    # baseline_rhythm cannot express it because that is a single rhythm for a
+    # whole dataset. Path is relative to the dataset directory; the first CSV
+    # column is the record (any directory prefix is ignored) and the second is
+    # the label. Empty for every set that annotates normally.
+    label_file: str = ""
+    # Maps the label strings in that CSV onto WFDB rhythm tokens, as pairs
+    # because a frozen dataclass cannot hold a dict.
+    label_map: tuple = field(default_factory=tuple)
     note: str = ""
 
 
 REGISTRY: dict[str, Dataset] = {
     # ---------------------------------------------------------------- training
+    # The CinC 2017 challenge set: 8,528 single-lead recordings, 30 s each at
+    # 300 Hz, sorted into normal / AF / other / too noisy. Registered for the
+    # rhythm stage to supply the OTHER class, which the other sources do not
+    # carry - ltafdb, icentia and nsrdb are all effectively binary, and OTHER
+    # sat at 34 training windows against 190 in test.
+    #
+    # 2,415 of these recordings are labelled "other rhythm", which is the
+    # whole reason for adding it.
+    #
+    # Labels are in training/REFERENCE.csv, one per recording, so this is the
+    # first dataset to use label_file. Noisy recordings map to "(NOISE" and
+    # are dropped downstream rather than assigned to a class.
+    #
+    # Each recording is treated as its own patient. The challenge provides no
+    # subject identifiers, so recordings from the same person cannot be
+    # grouped; the challenge itself scored them independently. Worth stating
+    # in the write-up as a limitation of this source.
+    "challenge2017": Dataset(
+        key="challenge2017", slug="challenge-2017", version="1.0.0",
+        fs=300, channel=0, role="train", labels="rhythm",
+        patient_re=r"^(A\d+)$",
+        stages=("rhythm",),
+        label_file="training/REFERENCE.csv",
+        label_map=(("N", "(N"), ("A", "(AFIB"),
+                   ("O", "(OTHER"), ("~", "(NOISE")),
+        note="PhysioNet/CinC Challenge 2017. 8,528 recordings, 30 s, single "
+             "lead, 300 Hz, AliveCor handheld. N 5,076 / A 758 / O 2,415 / "
+             "noisy 279. Added for the OTHER class.",
+    ),
+
     "icentia11k": Dataset(
         key="icentia11k", slug="icentia11k-continuous-ecg", version="1.0",
         fs=250, channel=0, role="train", labels="both",
@@ -71,11 +111,97 @@ REGISTRY: dict[str, Dataset] = {
         note="Malignant ventricular arrhythmia. 22 records of 35 minutes. Also a "
              "quality carrier, same reason as CUDB.",
     ),
+    # Healthy sinus rhythm from 20 young and 20 elderly subjects, two hours
+    # each at rest. Registered for shockable only, as negative material: the
+    # detector's sinus specificity was 0.929 against an AHA target of 0.99,
+    # and NSRDB - its only ordinary-rhythm source - is 18 subjects aged 20 to
+    # 50. The elderly half here is the cohort the device is actually for.
+    #
+    # Channel 0 is respiration. Taking the default index would feed the model
+    # a breathing trace, so the ECG lead is pinned by name.
+    #
+    # Caveat worth carrying into the write-up: these are resting recordings.
+    # Munji is worn while moving. Closer to the gap than NSRDB, still not the
+    # deployment condition.
+    "fantasia": Dataset(
+        key="fantasia", slug="fantasia", version="1.0.0",
+        fs=250, channel=1, role="train", labels="rhythm",
+        patient_re=r"^(f\d[oy]\d+)$",
+        stages=("shockable",),
+        channel_names=("ECG",),
+        baseline_rhythm="(N",
+        note="Fantasia. 20 young and 20 elderly healthy subjects, sinus "
+             "rhythm at rest, two hours each. Beat annotations in .ecg with "
+             "no rhythm markers, so the whole record is sinus by declaration.",
+    ),
+
+    # 28 records, most from exercise stress tests, from patients with
+    # transient ST depression. Registered for shockable as negative material:
+    # it is the only source here that is cardiac, in sinus rhythm, and under
+    # exertion at the same time - the combination the sinus specificity gap
+    # points at.
+    #
+    # Chosen over the European ST-T Database, which fits the cohort equally
+    # well but annotates ST episodes with tokens the rhythm parser would read
+    # as rhythm changes. Extending AMBIGUOUS_RHYTHMS to cover them would
+    # change the config hash and invalidate every cache in the project. stdb
+    # carries beat annotations only - aux_note is empty across its files - so
+    # it costs nothing outside this stage.
+    #
+    # baseline_rhythm declares the record non-shockable, as for NSRDB and
+    # Fantasia. For those it was safe by construction; here it is an
+    # assumption about supervised stress tests. If VF sensitivity drops after
+    # adding this, suspect it first.
+    "stdb": Dataset(
+        key="stdb", slug="stdb", version="1.0.0",
+        fs=360, channel=0, role="train", labels="beat",
+        patient_re=r"^(\d+)$",
+        stages=("shockable",),
+        baseline_rhythm="(N",
+        note="MIT-BIH ST Change. 28 records, mostly exercise stress tests, "
+             "showing transient ST depression. Beat annotations only, no ST "
+             "or rhythm markers, so the whole record is declared sinus.",
+    ),
+
+    # Ambulatory Holter from 79 subjects aged 30 to 84, all with diagnosed or
+    # suspected ischaemia. Registered for shockable as negative material: it
+    # is older, cardiac and moving at once, which is the cohort this device
+    # is for.
+    #
+    # V5 leads the preference list because it is the most common signal here
+    # (51 of 90 records) and is the chest position CM5 is named after.
+    #
+    # Most annotations in this set mark ST-segment and T-wave episodes, not
+    # rhythms: (ST0+, (ST1-, (T0+, (T1+ and their closers. They are not in
+    # RHYTHM_MAP, so the loader treats each as an unrecognised rhythm and
+    # drops the windows it dominates. That loses coverage but mislabels
+    # nothing - a dropped window is dropped, not called sinus.
+    #
+    # Listing them as ambiguous in config would keep more of each record, but
+    # AMBIGUOUS_RHYTHMS feeds the config hash, so it would invalidate every
+    # cache in the project including Furat's. Worth asking for only if this
+    # version shows a gain above the measured noise band.
+    "edb": Dataset(
+        key="edb", slug="edb", version="1.0.0",
+        fs=250, channel=0, role="train", labels="rhythm",
+        patient_re=r"^(e\d+)$",
+        stages=("shockable",),
+        channel_names=("V5", "V4", "V3", "V2", "V1", "MLIII", "MLI", "D3"),
+        note="European ST-T. 90 two-hour ambulatory records, 79 subjects aged "
+             "30-84 with ischaemia. ST and T episode markers are left "
+             "unrecognised, so affected windows drop rather than mislabel.",
+    ),
+
     "nsrdb": Dataset(
         key="nsrdb", slug="nsrdb", version="1.0.0",
         fs=128, channel=0, role="train", labels="rhythm",
         patient_re=r"^(\d+)$",
-        stages=("quality", "rhythm"),
+        # Also registered for shockable. CUDB and VFDB are arrest recordings
+        # and carry almost no ordinary rhythm, so the detector learned
+        # "not dangerous" from the quiet parts of dangerous recordings and
+        # alarmed on any unfamiliar-looking normal trace. This supplies the
+        # healthy hearts that set was missing.
+        stages=("quality", "rhythm", "shockable"),
         baseline_rhythm="(N",
         note="Clean normal sinus rhythm. Primary carrier for synthesised quality "
              "labels, but never the only one — see ltafdb.",

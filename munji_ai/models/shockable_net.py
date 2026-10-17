@@ -133,6 +133,12 @@ class MissPenaltyLoss(nn.Module):
     Mirror image of the gate's AsymmetricLoss. There the risk was discarding
     good signal; here it is calling a fibrillating heart normal.
 
+    Since the detector moved to focal loss, two mechanisms act together and
+    should not be confused. The focal term decides which examples the model
+    attends to - it stops the easy majority from owning the gradient. The miss
+    penalty decides what an error costs once made. One is about attention, the
+    other about consequence.
+
     The penalty is larger than the gate's 1.5 because the consequences are not
     comparable — but it is still bounded, and for the same reason the gate
     bounds its own. Push it far enough and the model calls everything
@@ -143,17 +149,42 @@ class MissPenaltyLoss(nn.Module):
 
     def __init__(self, class_weights: torch.Tensor | None = None,
                  miss_penalty: float = 2.5,
-                 label_smoothing: float = 0.05):
+                 label_smoothing: float = 0.05,
+                 gamma: float = 2.0):
         super().__init__()
         self.register_buffer("w", class_weights if class_weights is not None
                              else torch.ones(len(SHOCKABLE_CLASSES)))
         self.penalty = miss_penalty
         self.smoothing = label_smoothing
+        # Focusing parameter. 2.0 is the published default and what the 2026
+        # comparative evaluation of ECG architectures uses throughout. Set it
+        # to 0 to recover the previous weighted cross-entropy exactly.
+        self.gamma = gamma
 
     def forward(self, logits, target):
         losses = F.cross_entropy(logits, target, weight=self.w,
                                  label_smoothing=self.smoothing,
                                  reduction="none")
+
+        # Focal modulation. Cross-entropy keeps pushing on windows the model
+        # already classifies correctly, and with thousands of obvious sinus
+        # windows that is where most of the gradient goes. The (1 - p)^gamma
+        # term shrinks their contribution so the boundary cases get the
+        # capacity instead.
+        #
+        # It also regularises confidence. The failure inspection found the
+        # model was "confidently wrong" on most of its weak patients - mean
+        # confidence above 0.6 while mistaken - which is the overconfidence
+        # cross-entropy is known to produce in high-capacity networks.
+        #
+        # gamma = 0 reduces this to exactly the weighted cross-entropy used
+        # before, which makes it a controlled comparison rather than a
+        # rewrite.
+        if self.gamma > 0:
+            p_true = F.softmax(logits, dim=-1).gather(
+                1, target.unsqueeze(1)).squeeze(1).clamp(1e-6, 1.0)
+            losses = losses * (1.0 - p_true) ** self.gamma
+
         pred = logits.argmax(dim=-1)
         missed = (target == SHOCKABLE_IDX) & (pred != SHOCKABLE_IDX)
         return (losses * torch.where(missed, self.penalty, 1.0)).mean()

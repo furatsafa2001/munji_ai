@@ -82,6 +82,30 @@ def confirmed_alarms(y_true, y_pred, records, offsets, rule=(2, 3),
 
     A run of confirmed windows is one alarm, not several: an episode that
     raises the phone once is the unit the patient experiences.
+
+    Records too short to confirm are excluded, not scored as misses
+    -----------------------------------------------------------------
+    The rule needs n positive windows inside a span of m. A record that
+    yields fewer than m windows can never satisfy it, so every episode in it
+    would count as missed no matter how well the model classified the signal.
+
+    That is not a hypothetical. Most of the rhythm data is now short records:
+    CinC 2017 contributes one 30-second recording per subject, which is
+    exactly one window, and icentia segments give about two. Scoring those
+    here dragged episode sensitivity to 0.417 while window-level AF
+    sensitivity was 0.956 — the gap was the metric, not the model.
+
+    The published convention separates the two. Short single-recording sets
+    like CinC 2017 are scored per recording; long-term sets with marked
+    episode starts and ends, such as AFDB and LTAFDB, are scored per episode.
+    Clinical studies that do both report them as two distinct numbers rather
+    than pooling them.
+
+    So this counts episodes only where confirmation is possible, and returns
+    how much was set aside so the figure is never read as covering everything.
+    A deployed patch records continuously, so every real episode spans many
+    windows; the exclusion is an artefact of evaluating on archives, not a
+    gap in what the device will do.
     """
     n, m = rule
     by_rec = defaultdict(list)
@@ -89,7 +113,16 @@ def confirmed_alarms(y_true, y_pred, records, offsets, rule=(2, 3),
         by_rec[r].append(i)
 
     caught = missed = false_alarms = true_alarms = 0
+    skipped_records = skipped_windows = skipped_positive = 0
+    scored_records = 0
+
     for idxs in by_rec.values():
+        if len(idxs) < m:
+            skipped_records += 1
+            skipped_windows += len(idxs)
+            skipped_positive += sum(1 for i in idxs if y_true[i] == positive)
+            continue
+        scored_records += 1
         order = sorted(idxs, key=lambda i: offsets[i])
         pred = [y_pred[i] == positive for i in order]
         true = [y_true[i] == positive for i in order]
@@ -119,6 +152,10 @@ def confirmed_alarms(y_true, y_pred, records, offsets, rule=(2, 3),
             prev = t
 
     return {"episodes_caught": caught, "episodes_missed": missed,
+            "records_scored": scored_records,
+            "records_too_short": skipped_records,
+            "windows_too_short": skipped_windows,
+            "positive_windows_too_short": skipped_positive,
             "false_alarms": false_alarms, "true_alarms": true_alarms,
             "episode_sensitivity": caught / max(caught + missed, 1)}
 
@@ -266,6 +303,14 @@ def main(argv=None) -> int:
     print(f"  episode sensitivity  {c['episode_sensitivity']:.3f}")
     print(f"  false alarms         {c['false_alarms']}  "
           f"(from {s['fp']} isolated false positives)")
+    print(f"  records scored       {c['records_scored']:,}")
+    if c["records_too_short"]:
+        print(f"  records too short    {c['records_too_short']:,}  "
+              f"({c['windows_too_short']:,} windows, "
+              f"{c['positive_windows_too_short']:,} of them {POSITIVE})")
+        print(f"  Fewer than {rule[1]} windows each, so the rule cannot fire on")
+        print("  them at all. They are scored by the per-window figures above,")
+        print("  which is how the short-recording literature reports them.")
 
     print("\n" + "=" * 62)
     print(f"  macro F1 (NSR, AF)  {best_f1:.3f}")
