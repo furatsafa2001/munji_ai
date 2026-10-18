@@ -247,16 +247,21 @@ def load_record(
             # change, not that the rhythm is unknown. For a set registered
             # with a baseline that is a positive statement about the whole
             # record; for every other set it stays empty and nothing happens.
-            if not len(rhy_s) and ds.label_file:
-                # One label for the whole recording, from the dataset's CSV.
-                token = _record_label(ds, name, root)
-                if token:
-                    rhy_s = np.array([0], dtype=np.int64)
-                    rhy_y = np.array([token], dtype=object)
             if not len(rhy_s) and ds.baseline_rhythm:
                 rhy_s = np.array([0], dtype=np.int64)
                 rhy_y = np.array([ds.baseline_rhythm], dtype=object)
             break
+
+    # Per-record labels from a CSV, for sets that ship no .atr files.
+    # Must sit outside the annotation-extension loop above: that loop
+    # only runs its body when one of atr/ecg/qrs opens, and CinC 2017
+    # has none of them, so a branch placed inside it never fires and
+    # every record comes back with no rhythm intervals at all.
+    if not len(rhy_s) and ds.label_file:
+        token = _record_label(ds, name, root)
+        if token:
+            rhy_s = np.array([0], dtype=np.int64)
+            rhy_y = np.array([token], dtype=object)
 
     return Record(
         dataset=ds.key,
