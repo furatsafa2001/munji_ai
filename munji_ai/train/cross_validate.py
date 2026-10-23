@@ -145,7 +145,8 @@ def train_one_fold(stage, Xtr, ytr, Xva, device, args, classes):
 
     model = build().to(device)
     crit = Loss(class_weights(ytr).to(device),
-                **{penalty_kw: args.penalty}).to(device)
+                **{penalty_kw: args.penalty},
+                gamma=args.gamma).to(device)
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
     sched = torch.optim.lr_scheduler.OneCycleLR(
         opt, max_lr=args.lr, epochs=args.epochs, steps_per_epoch=len(loader))
@@ -208,6 +209,8 @@ def main(argv=None) -> int:
     ap.add_argument("--batch", type=int, default=128)
     ap.add_argument("--lr", type=float, default=3e-3)
     ap.add_argument("--penalty", type=float, default=None)
+    ap.add_argument("--gamma", type=float, default=2.0,
+                    help="focal loss gamma; 0 = plain weighted cross-entropy")
     ap.add_argument("--device", default="auto")
     ap.add_argument("--seed", type=int, default=0)
     a = ap.parse_args(argv)
@@ -233,6 +236,7 @@ def main(argv=None) -> int:
           f"(train + val; test untouched)")
     print(f"folds       {a.folds}, grouped by patient")
     print(f"device      {device}")
+    print(f"gamma       {a.gamma}  (focal; 0 = weighted cross-entropy)")
     print(f"selection   {cfg['select']}"
           + (f" subject to sensitivity >= {cfg['floor']:.2f}"
              if cfg["floor"] else "") + "\n")
