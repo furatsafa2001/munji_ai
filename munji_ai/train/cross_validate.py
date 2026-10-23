@@ -144,6 +144,10 @@ def train_one_fold(stage, Xtr, ytr, Xva, device, args, classes):
                         shuffle=True, drop_last=True)
 
     model = build().to(device)
+    aug = None
+    if getattr(args, "augment", False):
+        from ..data.train_augment import TrainAugment
+        aug = TrainAugment(args._bank_train, device, seed=args.seed)
     crit = Loss(class_weights(ytr).to(device),
                 **{penalty_kw: args.penalty},
                 gamma=args.gamma).to(device)
@@ -160,6 +164,8 @@ def train_one_fold(stage, Xtr, ytr, Xva, device, args, classes):
         model.train()
         for xb, yb in loader:
             xb, yb = xb.to(device), yb.to(device)
+            if aug is not None:
+                xb = aug(xb)
             opt.zero_grad()
             crit(model(xb), yb).backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
@@ -199,6 +205,31 @@ def predict(model, loader, device) -> np.ndarray:
     return np.concatenate(out)
 
 
+def _report_noisy(y, pred, score, classes, positive, snr_db) -> None:
+    """Pooled out-of-fold metrics on the noisy copy of every held-out window."""
+    s = binary_scores(y, pred, positive)
+    print(f"\n  under NSTDB noise at {snr_db:g} dB (held-out noise, same windows)")
+    print(f"    sensitivity   {s['sensitivity']:.3f}")
+    print(f"    specificity   {s['specificity']:.3f}")
+    print(f"    ROC AUC       {roc_auc(y == positive, score):.3f}")
+    n = len(classes)
+    ix = {c: i for i, c in enumerate(classes)}
+    cm = np.zeros((n, n), dtype=int)
+    for t, p in zip(y, pred):
+        cm[ix[t], ix[p]] += 1
+    width = max(len(c) for c in classes) + 2
+    print("    " + " " * width + "".join(f"{c:>{width}}" for c in classes))
+    for i, c in enumerate(classes):
+        print(f"    {c:<{width}}" + "".join(f"{v:>{width},}" for v in cm[i]))
+    f1s = []
+    for i in range(n):
+        prec = cm[i, i] / max(cm[:, i].sum(), 1)
+        rec = cm[i, i] / max(cm[i].sum(), 1)
+        f1s.append(0.0 if prec + rec == 0 else 2 * prec * rec / (prec + rec))
+    print("    per-class F1  "
+          + "   ".join(f"{c} {v:.3f}" for c, v in zip(classes, f1s)))
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--stage", choices=sorted(STAGES), default="shockable")
@@ -211,6 +242,10 @@ def main(argv=None) -> int:
     ap.add_argument("--penalty", type=float, default=None)
     ap.add_argument("--gamma", type=float, default=2.0,
                     help="focal loss gamma; 0 = plain weighted cross-entropy")
+    ap.add_argument("--augment", action="store_true",
+                    help="NSTDB noise, jitter and cutout on training batches")
+    ap.add_argument("--noisy-eval", type=float, default=None, metavar="SNR_DB",
+                    help="also score each held-out fold with NSTDB noise at this SNR")
     ap.add_argument("--device", default="auto")
     ap.add_argument("--seed", type=int, default=0)
     a = ap.parse_args(argv)
@@ -226,6 +261,10 @@ def main(argv=None) -> int:
     device = pick_device(a.device)
 
     d = pooled_cache(a.stage, a.cache)
+    if a.augment or a.noisy_eval is not None:
+        from ..data.train_augment import BANK_NAME, load_noise_bank, split_bank
+        a._bank_train, a._bank_eval = split_bank(
+            load_noise_bank(a.cache / BANK_NAME))
     y = np.asarray(d["y"], dtype=str)
     patients = np.asarray(d["patient"], dtype=str)
     folds = assign_folds(patients, a.folds, a.seed)
@@ -237,12 +276,17 @@ def main(argv=None) -> int:
     print(f"folds       {a.folds}, grouped by patient")
     print(f"device      {device}")
     print(f"gamma       {a.gamma}  (focal; 0 = weighted cross-entropy)")
+    print(f"augment     {'on (noise, jitter, cutout)' if a.augment else 'off'}")
+    if a.noisy_eval is not None:
+        print(f"noisy eval  NSTDB at {a.noisy_eval:g} dB, held-out noise segments")
     print(f"selection   {cfg['select']}"
           + (f" subject to sensitivity >= {cfg['floor']:.2f}"
              if cfg["floor"] else "") + "\n")
 
     oof_pred = np.empty(len(y), dtype=object)
     oof_score = np.zeros(len(y))
+    noisy_pred = np.empty(len(y), dtype=object)
+    noisy_score = np.zeros(len(y))
     rows = []
 
     print(f"{'fold':>5}{'patients':>10}{'windows':>9}{'sens':>8}{'spec':>8}"
@@ -261,6 +305,17 @@ def main(argv=None) -> int:
 
         oof_pred[te] = pred
         oof_score[te] = score
+
+        if a.noisy_eval is not None:
+            from ..data.train_augment import add_noise_fixed
+            Xn = add_noise_fixed(d["X"][te], a._bank_eval, a.noisy_eval,
+                                 seed=1000 + f)
+            Pn = predict(model, DataLoader(
+                TensorDataset(torch.from_numpy(Xn),
+                              torch.zeros(len(Xn), dtype=torch.long)),
+                batch_size=256), device)
+            noisy_pred[te] = np.array([classes[i] for i in Pn.argmax(1)])
+            noisy_score[te] = Pn[:, classes.index(positive)]
 
         s = binary_scores(y[te], pred, positive)
         scored = [c for c in classes if c != "OTHER"]
@@ -307,6 +362,13 @@ def main(argv=None) -> int:
     print("  " + " " * width + "".join(f"{c:>{width}}" for c in classes))
     for i, c in enumerate(classes):
         print(f"  {c:<{width}}" + "".join(f"{v:>{width},}" for v in cm[i]))
+    f1s = []
+    for i in range(n):
+        prec = cm[i, i] / max(cm[:, i].sum(), 1)
+        rec = cm[i, i] / max(cm[i].sum(), 1)
+        f1s.append(0.0 if prec + rec == 0 else 2 * prec * rec / (prec + rec))
+    print("\n  per-class F1  "
+          + "   ".join(f"{c} {v:.3f}" for c, v in zip(classes, f1s)))
 
     if a.stage == "shockable":
         from .train_shockable import confirmed_alarms
@@ -320,11 +382,18 @@ def main(argv=None) -> int:
     print(f"    episode sensitivity  {c['episode_sensitivity']:.3f}")
     print(f"    false alarms         {c['false_alarms']}")
 
+    if a.noisy_eval is not None:
+        _report_noisy(y, np.array([str(v) for v in noisy_pred]), noisy_score,
+                      classes, positive, a.noisy_eval)
+
     a.out.mkdir(parents=True, exist_ok=True)
     oof_path = a.out / f"{a.stage}_oof.npz"
+    extra = {} if a.noisy_eval is None else {
+        "pred_noisy": np.array([str(v) for v in noisy_pred]),
+        "score_noisy": noisy_score, "noisy_snr_db": a.noisy_eval}
     np.savez_compressed(oof_path, y=y, pred=oof, score=oof_score,
                         patient=patients, record=d["record"],
-                        offset=d["offset"], fold=fold_of)
+                        offset=d["offset"], fold=fold_of, **extra)
 
     print("\n" + "=" * 62)
     print("  Report the spread, not a single fold. A fold's own peak is an")
