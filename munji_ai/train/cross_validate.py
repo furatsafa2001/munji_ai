@@ -133,17 +133,21 @@ def roc_auc(y_bin: np.ndarray, score: np.ndarray) -> float:
     return float(trap(tpr, fpr))
 
 
-def train_one_fold(stage, Xtr, ytr, Xva, device, args, classes):
+def train_one_fold(stage, Xtr, ytr, Xva, device, args, classes,
+                   Ftr=None, Fva=None):
     build, class_weights, Loss, penalty_kw = build_for(stage)
     cfg = STAGES[stage]
     idx = {c: i for i, c in enumerate(classes)}
+    use_rr = Ftr is not None
 
     Xt = torch.from_numpy(Xtr.astype(np.float32))
     yt = torch.tensor([idx[s] for s in ytr], dtype=torch.long)
-    loader = DataLoader(TensorDataset(Xt, yt), batch_size=args.batch,
+    tensors = (Xt, torch.from_numpy(Ftr.astype(np.float32)), yt) if use_rr \
+        else (Xt, yt)
+    loader = DataLoader(TensorDataset(*tensors), batch_size=args.batch,
                         shuffle=True, drop_last=True)
 
-    model = build().to(device)
+    model = (build(n_rr=Ftr.shape[1]) if use_rr else build()).to(device)
     crit = Loss(class_weights(ytr).to(device),
                 **{penalty_kw: args.penalty},
                 gamma=args.gamma).to(device)
@@ -152,16 +156,18 @@ def train_one_fold(stage, Xtr, ytr, Xva, device, args, classes):
         opt, max_lr=args.lr, epochs=args.epochs, steps_per_epoch=len(loader))
 
     Xv = torch.from_numpy(Xva.astype(np.float32))
-    val_loader = DataLoader(TensorDataset(Xv, torch.zeros(len(Xv), dtype=torch.long)),
-                            batch_size=256)
+    extra = torch.from_numpy(Fva.astype(np.float32)) if use_rr \
+        else torch.zeros(len(Xv), dtype=torch.long)
+    val_loader = DataLoader(TensorDataset(Xv, extra), batch_size=256)
 
     best, best_state = -1.0, None
     for _ in range(args.epochs):
         model.train()
-        for xb, yb in loader:
-            xb, yb = xb.to(device), yb.to(device)
+        for batch in loader:
+            batch = [t.to(device) for t in batch]
+            yb = batch[-1]
             opt.zero_grad()
-            crit(model(xb), yb).backward()
+            crit(model(*batch[:-1]), yb).backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             opt.step()
             sched.step()
@@ -194,8 +200,10 @@ def train_one_fold(stage, Xtr, ytr, Xva, device, args, classes):
 def predict(model, loader, device) -> np.ndarray:
     model.eval()
     out = []
-    for xb, _ in loader:
-        out.append(torch.softmax(model(xb.to(device)), dim=-1).cpu().numpy())
+    for xb, extra in loader:
+        inputs = (xb.to(device), extra.to(device)) if getattr(model, "n_rr", 0) \
+            else (xb.to(device),)
+        out.append(torch.softmax(model(*inputs), dim=-1).cpu().numpy())
     return np.concatenate(out)
 
 
@@ -211,9 +219,13 @@ def main(argv=None) -> int:
     ap.add_argument("--penalty", type=float, default=None)
     ap.add_argument("--gamma", type=float, default=2.0,
                     help="focal loss gamma; 0 = plain weighted cross-entropy")
+    ap.add_argument("--rr", action="store_true",
+                    help="rhythm only: fuse RR-interval features into the model")
     ap.add_argument("--device", default="auto")
     ap.add_argument("--seed", type=int, default=0)
     a = ap.parse_args(argv)
+    if a.rr and a.stage != "rhythm":
+        ap.error("--rr applies to the rhythm stage only")
 
     cfg = STAGES[a.stage]
     classes = list(cfg["classes"])
@@ -226,6 +238,11 @@ def main(argv=None) -> int:
     device = pick_device(a.device)
 
     d = pooled_cache(a.stage, a.cache)
+    F = None
+    if a.rr:
+        from ..features.rr import cached_rr_features
+        F = cached_rr_features(d["X"], d["record"], d["offset"],
+                               a.cache / f"{a.stage}_trainval_rr.npz")
     y = np.asarray(d["y"], dtype=str)
     patients = np.asarray(d["patient"], dtype=str)
     folds = assign_folds(patients, a.folds, a.seed)
@@ -237,6 +254,7 @@ def main(argv=None) -> int:
     print(f"folds       {a.folds}, grouped by patient")
     print(f"device      {device}")
     print(f"gamma       {a.gamma}  (focal; 0 = weighted cross-entropy)")
+    print(f"rr features {'on, ' + str(F.shape[1]) if F is not None else 'off'}")
     print(f"selection   {cfg['select']}"
           + (f" subject to sensitivity >= {cfg['floor']:.2f}"
              if cfg["floor"] else "") + "\n")
@@ -255,7 +273,8 @@ def main(argv=None) -> int:
 
         t0 = time.time()
         model, P = train_one_fold(a.stage, d["X"][tr], y[tr], d["X"][te],
-                                  device, a, classes)
+                                  device, a, classes,
+                                  *((F[tr], F[te]) if F is not None else ()))
         pred = np.array([classes[i] for i in P.argmax(1)])
         score = P[:, classes.index(positive)]
 
@@ -307,6 +326,13 @@ def main(argv=None) -> int:
     print("  " + " " * width + "".join(f"{c:>{width}}" for c in classes))
     for i, c in enumerate(classes):
         print(f"  {c:<{width}}" + "".join(f"{v:>{width},}" for v in cm[i]))
+    f1s = []
+    for i in range(n):
+        prec = cm[i, i] / max(cm[:, i].sum(), 1)
+        rec = cm[i, i] / max(cm[i].sum(), 1)
+        f1s.append(0.0 if prec + rec == 0 else 2 * prec * rec / (prec + rec))
+    print("\n  per-class F1  "
+          + "   ".join(f"{c} {v:.3f}" for c, v in zip(classes, f1s)))
 
     if a.stage == "shockable":
         from .train_shockable import confirmed_alarms

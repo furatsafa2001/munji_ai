@@ -96,7 +96,8 @@ class RhythmNet(nn.Module):
     """
 
     def __init__(self, n_classes: int = len(RHYTHM_CLASSES),
-                 widths=(16, 32, 64, 96, 128, 160), dropout: float = 0.1):
+                 widths=(16, 32, 64, 96, 128, 160), dropout: float = 0.1,
+                 n_rr: int = 0):
         super().__init__()
         dilations = (1, 2, 4, 8, 16, 32)
         chans = (1,) + tuple(widths)
@@ -105,23 +106,34 @@ class RhythmNet(nn.Module):
                       dropout=dropout)
             for i in range(len(widths))
         ])
+        # Optional RR-interval features (munji_ai.features.rr), fused after
+        # pooling. BatchNorm puts them on the embedding's scale using training
+        # statistics only. n_rr = 0 builds exactly the original network, so
+        # existing checkpoints still load.
+        self.n_rr = n_rr
+        self.rr_norm = nn.BatchNorm1d(n_rr) if n_rr else None
         self.head = nn.Sequential(
-            nn.Linear(widths[-1] * 3, 96),
+            nn.Linear(widths[-1] * 3 + n_rr, 96),
             nn.GELU(),
             nn.Dropout(dropout),
             nn.Linear(96, n_classes),
         )
 
-    def forward(self, x):
+    def forward(self, x, rr=None):
         if x.dim() == 2:
             x = x.unsqueeze(1)
         h = self.blocks(x)
         pooled = torch.cat(
             [h.mean(dim=-1), h.amax(dim=-1), h.std(dim=-1)], dim=1)
+        if self.n_rr:
+            if rr is None:
+                raise ValueError(
+                    f"this model was built with {self.n_rr} RR features; pass rr")
+            pooled = torch.cat([pooled, self.rr_norm(rr)], dim=1)
         return self.head(pooled)
 
     @torch.no_grad()
-    def predict_proba(self, x) -> torch.Tensor:
+    def predict_proba(self, x, rr=None) -> torch.Tensor:
         """P(AF) per window.
 
         Graded, not thresholded: config.CONFIRMATION["af"] wants 2 of 3
@@ -129,7 +141,7 @@ class RhythmNet(nn.Module):
         rather than a decision.
         """
         self.eval()
-        return F.softmax(self(x), dim=-1)[:, AF_IDX]
+        return F.softmax(self(x, rr), dim=-1)[:, AF_IDX]
 
     def n_params(self) -> int:
         return sum(p.numel() for p in self.parameters() if p.requires_grad)
