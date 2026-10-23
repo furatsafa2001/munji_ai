@@ -246,6 +246,8 @@ def main(argv=None) -> int:
                     help="NSTDB noise, jitter and cutout on training batches")
     ap.add_argument("--noisy-eval", type=float, default=None, metavar="SNR_DB",
                     help="also score each held-out fold with NSTDB noise at this SNR")
+    ap.add_argument("--save-models", action="store_true",
+                    help="save each fold's selected model next to the OOF file")
     ap.add_argument("--device", default="auto")
     ap.add_argument("--seed", type=int, default=0)
     a = ap.parse_args(argv)
@@ -300,6 +302,9 @@ def main(argv=None) -> int:
         t0 = time.time()
         model, P = train_one_fold(a.stage, d["X"][tr], y[tr], d["X"][te],
                                   device, a, classes)
+        if a.save_models:
+            a.out.mkdir(parents=True, exist_ok=True)
+            torch.save(model.state_dict(), a.out / f"{a.stage}_fold{f}.pt")
         pred = np.array([classes[i] for i in P.argmax(1)])
         score = P[:, classes.index(positive)]
 
