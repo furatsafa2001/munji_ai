@@ -180,6 +180,8 @@ def main(argv=None) -> int:
     ap.add_argument("--lr", type=float, default=2e-3)
     ap.add_argument("--patience", type=int, default=8)
     ap.add_argument("--penalty", type=float, default=1.3)
+    ap.add_argument("--gamma", type=float, default=2.0,
+                    help="focal loss gamma; 0 = plain weighted cross-entropy")
     ap.add_argument("--device", default="auto")
     ap.add_argument("--seed", type=int, default=0)
     a = ap.parse_args(argv)
@@ -226,7 +228,8 @@ def main(argv=None) -> int:
           f"  (capped)")
     print(f"selected on macro F1 over {SCORED_CLASSES}\n")
 
-    crit = RhythmLoss(w.to(device), af_miss_penalty=a.penalty).to(device)
+    crit = RhythmLoss(w.to(device), af_miss_penalty=a.penalty,
+                      gamma=a.gamma).to(device)
     opt = torch.optim.AdamW(model.parameters(), lr=a.lr, weight_decay=1e-4)
     sched = torch.optim.lr_scheduler.OneCycleLR(
         opt, max_lr=a.lr, epochs=a.epochs, steps_per_epoch=len(train_loader))

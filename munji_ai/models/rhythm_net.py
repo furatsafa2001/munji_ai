@@ -136,7 +136,11 @@ class RhythmNet(nn.Module):
 
 
 class RhythmLoss(nn.Module):
-    """Weighted cross-entropy with a bounded weight and a small AF miss cost.
+    """Focal-weighted cross-entropy with a bounded weight and a small AF miss cost.
+
+    The focal term decides which windows the model attends to; the miss
+    penalty decides what a missed AF window costs. Same split of concerns as
+    MissPenaltyLoss in the shockable detector.
 
     Two guards, both about not letting a rare class wreck training.
 
@@ -155,17 +159,31 @@ class RhythmLoss(nn.Module):
 
     def __init__(self, class_weights: torch.Tensor | None = None,
                  af_miss_penalty: float = 1.3,
-                 label_smoothing: float = 0.05):
+                 label_smoothing: float = 0.05,
+                 gamma: float = 2.0):
         super().__init__()
         self.register_buffer("w", class_weights if class_weights is not None
                              else torch.ones(len(RHYTHM_CLASSES)))
         self.penalty = af_miss_penalty
         self.smoothing = label_smoothing
+        # Focusing parameter, as in MissPenaltyLoss. 0 recovers the weighted
+        # cross-entropy used before this change exactly.
+        self.gamma = gamma
 
     def forward(self, logits, target):
         losses = F.cross_entropy(logits, target, weight=self.w,
                                  label_smoothing=self.smoothing,
                                  reduction="none")
+
+        # Focal modulation, identical to MissPenaltyLoss. (1 - p_true)^gamma
+        # shrinks the loss on windows already classified correctly, so the
+        # thousands of easy sinus windows stop owning the gradient and the
+        # boundary cases (OTHER, and OTHER called NSR) get the capacity.
+        if self.gamma > 0:
+            p_true = F.softmax(logits, dim=-1).gather(
+                1, target.unsqueeze(1)).squeeze(1).clamp(1e-6, 1.0)
+            losses = losses * (1.0 - p_true) ** self.gamma
+
         pred = logits.argmax(dim=-1)
         missed_af = (target == AF_IDX) & (pred != AF_IDX)
         return (losses * torch.where(missed_af, self.penalty, 1.0)).mean()
