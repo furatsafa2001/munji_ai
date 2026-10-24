@@ -182,6 +182,8 @@ def main(argv=None) -> int:
     ap.add_argument("--penalty", type=float, default=1.3)
     ap.add_argument("--gamma", type=float, default=2.0,
                     help="focal loss gamma; 0 = plain weighted cross-entropy")
+    ap.add_argument("--augment", action="store_true",
+                    help="NSTDB noise, jitter and cutout on training batches")
     ap.add_argument("--device", default="auto")
     ap.add_argument("--seed", type=int, default=0)
     a = ap.parse_args(argv)
@@ -223,6 +225,13 @@ def main(argv=None) -> int:
 
     model = build().to(device)
     w = class_weights(tr["y"])
+    aug = None
+    if a.augment:
+        from ..data.train_augment import (BANK_NAME, TrainAugment,
+                                          load_noise_bank, split_bank)
+        bank_train, _ = split_bank(load_noise_bank(a.cache / BANK_NAME))
+        aug = TrainAugment(bank_train, device, seed=a.seed)
+        print("augment     on (noise, jitter, cutout), training batches only")
     print(f"\nparameters  {model.n_params():,}")
     print(f"weights     {dict(zip(RHYTHM_CLASSES, [round(v, 2) for v in w.tolist()]))}"
           f"  (capped)")
@@ -243,6 +252,8 @@ def main(argv=None) -> int:
         total, t0 = 0.0, time.time()
         for xb, yb in train_loader:
             xb, yb = xb.to(device), yb.to(device)
+            if aug is not None:
+                xb = aug(xb)
             opt.zero_grad()
             loss = crit(model(xb), yb)
             loss.backward()
@@ -280,7 +291,9 @@ def main(argv=None) -> int:
     a.out.mkdir(parents=True, exist_ok=True)
     ckpt = a.out / "rhythm_net.pt"
     torch.save({"state_dict": best_state, "classes": list(RHYTHM_CLASSES),
-                "val_macro_f1_scored": best_f1, "epoch": best_epoch}, ckpt)
+                "val_macro_f1_scored": best_f1, "epoch": best_epoch,
+                "gamma": a.gamma, "augment": a.augment,
+                "confirmation": tuple(CONFIRMATION["af"])}, ckpt)
 
     pred, p_af = evaluate(model, val_loader, device)
     s = binary_scores(y_va_str, pred)

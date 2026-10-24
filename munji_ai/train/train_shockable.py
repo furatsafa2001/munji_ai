@@ -147,6 +147,14 @@ def main(argv=None) -> int:
     ap.add_argument("--lr", type=float, default=3e-3)
     ap.add_argument("--patience", type=int, default=8)
     ap.add_argument("--penalty", type=float, default=2.5)
+    ap.add_argument("--augment", action="store_true",
+                    help="NSTDB noise, jitter and cutout on training batches")
+    ap.add_argument("--extra-negatives", type=Path, default=None,
+                    help=".npz of extra negative windows for training only "
+                         "(data/hard_negatives.py)")
+    ap.add_argument("--threshold", type=float, default=0.65,
+                    help="operating threshold on P(shockable), validated on full "
+                         "days with eval/false_alarm_rate.py")
     ap.add_argument("--device", default="auto")
     ap.add_argument("--seed", type=int, default=0)
     a = ap.parse_args(argv)
@@ -161,6 +169,24 @@ def main(argv=None) -> int:
     overlap = set(tr["patient"].astype(str)) & set(va["patient"].astype(str))
     if overlap:
         raise AssertionError(f"patient leak between train and val: {overlap}")
+
+    if a.extra_negatives:
+        with np.load(a.extra_negatives, allow_pickle=False) as e:
+            ex = {k: e[k] for k in ("X", "y", "patient")}
+        if set(ex["y"].astype(str)) - {"not_shockable"}:
+            raise SystemExit("extra negatives must all be not_shockable")
+        shared = set(ex["patient"].astype(str)) & (
+            set(tr["patient"].astype(str)) | set(va["patient"].astype(str)))
+        if shared:
+            raise SystemExit(f"extra negatives share {len(shared)} patients with "
+                             f"train or val - that would leak")
+        tr = {"X": np.concatenate([tr["X"], ex["X"].astype(tr["X"].dtype)]),
+              "y": np.concatenate([np.asarray(tr["y"], dtype=str),
+                                   ex["y"].astype(str)]),
+              "patient": np.concatenate([np.asarray(tr["patient"], dtype=str),
+                                         ex["patient"].astype(str)])}
+        print(f"extra neg   {len(ex['X']):,} windows from "
+              f"{len(set(ex['patient'].astype(str)))} patients, train only")
 
     Xtr, ytr = as_tensors(tr)
     Xva, yva = as_tensors(va)
@@ -182,6 +208,13 @@ def main(argv=None) -> int:
 
     model = build().to(device)
     print(f"parameters  {model.n_params():,}")
+    aug = None
+    if a.augment:
+        from ..data.train_augment import (BANK_NAME, TrainAugment,
+                                          load_noise_bank, split_bank)
+        bank_train, _ = split_bank(load_noise_bank(a.cache / BANK_NAME))
+        aug = TrainAugment(bank_train, device, seed=a.seed)
+        print("augment     on (noise, jitter, cutout), training batches only")
     print(f"floor       sensitivity >= {SENSITIVITY_FLOOR:.2f} "
           f"(AHA/AAMI for VF)\n")
 
@@ -200,6 +233,8 @@ def main(argv=None) -> int:
         total, t0 = 0.0, time.time()
         for xb, yb in train_loader:
             xb, yb = xb.to(device), yb.to(device)
+            if aug is not None:
+                xb = aug(xb)
             opt.zero_grad()
             loss = crit(model(xb), yb)
             loss.backward()
@@ -242,7 +277,10 @@ def main(argv=None) -> int:
     a.out.mkdir(parents=True, exist_ok=True)
     ckpt = a.out / "shockable_net.pt"
     torch.save({"state_dict": best_state, "classes": list(SHOCKABLE_CLASSES),
-                "val_specificity": best_spec, "epoch": best_epoch}, ckpt)
+                "val_specificity": best_spec, "epoch": best_epoch,
+                "threshold": a.threshold, "augment": a.augment,
+                "extra_negatives": str(a.extra_negatives) if a.extra_negatives else None,
+                "confirmation": tuple(CONFIRMATION["vf"])}, ckpt)
 
     pred, p_shock = evaluate(model, val_loader, device)
     s = binary_scores(y_va_str, pred)
@@ -254,7 +292,7 @@ def main(argv=None) -> int:
 
     print("\ngraded operating points")
     print(f"  {'threshold':<12}{'sens':>8}{'spec':>8}{'ppv':>8}{'alarm rate':>12}")
-    for thr in (0.30, 0.50, 0.70, 0.90):
+    for thr in sorted({0.30, 0.50, a.threshold, 0.70, 0.90}):
         p = np.where(p_shock >= thr, POSITIVE, "not_shockable")
         t = binary_scores(y_va_str, p)
         rate = (p == POSITIVE).mean()
@@ -270,6 +308,17 @@ def main(argv=None) -> int:
     print(f"  episode sensitivity  {c['episode_sensitivity']:.3f}")
     print(f"  false alarms         {c['false_alarms']}  "
           f"(from {s['fp']} isolated false positives)")
+
+    p_op = np.where(p_shock >= a.threshold, POSITIVE, "not_shockable")
+    c_op = confirmed_alarms(y_va_str, p_op, va_rec, va_off, rule)
+    s_op = binary_scores(y_va_str, p_op)
+    print(f"\nat the operating threshold {a.threshold:.2f}")
+    print(f"  sensitivity          {s_op['sensitivity']:.3f}  "
+          f"(floor {SENSITIVITY_FLOOR:.2f})")
+    print(f"  specificity          {s_op['specificity']:.3f}")
+    print(f"  episodes caught      {c_op['episodes_caught']}/"
+          f"{c_op['episodes_caught'] + c_op['episodes_missed']}")
+    print(f"  false alarms         {c_op['false_alarms']}")
 
     print("\n" + "=" * 62)
     print(f"  sensitivity  {s['sensitivity']:.3f}  "
