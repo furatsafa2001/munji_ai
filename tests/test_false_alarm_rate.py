@@ -69,6 +69,13 @@ def main() -> int:
           and c3["delays"] == [2])
     c4 = far.count_alarms(P, T2, (4, 4))
     check("a rule longer than the episode misses it", c4["caught"] == 0)
+    long_T = np.zeros(40, dtype=bool)
+    long_T[5:20] = True                      # 15 windows: 40 s at 2.5 s stride
+    long_T[30:33] = True                     # 3 windows: 10 s
+    c5 = far.count_alarms(long_T.copy(), long_T, rule)
+    check("episodes of 30 s or more count as sustained, short runs do not",
+          (c5["episodes"], c5["sus_episodes"], c5["sus_caught"]) == (2, 1, 1),
+          f"{c5['episodes']} episodes, {c5['sus_episodes']} sustained")
     z = far.count_alarms(np.zeros(20, bool), np.zeros(20, bool), rule)
     check("no positives, no alarms", (z["false"], z["true"]) == (0, 0))
 

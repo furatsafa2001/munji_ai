@@ -73,6 +73,13 @@ from ..models.shockable_net import build
 
 DEFAULT_DATASETS = ("nsrdb", "stdb", "edb", "fantasia")
 
+# An episode counts as sustained when annotated shockable for at least this
+# long: the conventional 30 s line between sustained and non-sustained VT.
+# A non-sustained run ends on its own; a sustained one is the emergency.
+SUSTAINED_S = 30.0
+WINDOW_S = C.WINDOW_SEC["shockable"]
+STRIDE_S = C.WINDOW_STRIDE_SEC["shockable"]
+
 
 def fold_of_records(oof_path: Path, cache_dir: Path) -> dict:
     """(dataset, record) -> fold, from the saved out-of-fold assignment."""
@@ -153,7 +160,8 @@ def count_alarms(pred: np.ndarray, truth: np.ndarray, rule) -> dict:
     csum = np.concatenate([[0], np.cumsum(pred)])
     idx = np.arange(len(pred))
     fired = (csum[idx + 1] - csum[np.maximum(0, idx - m + 1)]) >= n
-    out = {"false": 0, "true": 0, "episodes": 0, "caught": 0, "delays": []}
+    out = {"false": 0, "true": 0, "episodes": 0, "caught": 0, "delays": [],
+           "sus_episodes": 0, "sus_caught": 0}
 
     for i in np.flatnonzero(fired):
         if i == 0 or not fired[i - 1]:
@@ -163,11 +171,15 @@ def count_alarms(pred: np.ndarray, truth: np.ndarray, rule) -> dict:
     t = np.concatenate([[False], truth, [False]])
     starts = np.flatnonzero(~t[:-1] & t[1:])
     ends = np.flatnonzero(t[:-1] & ~t[1:])          # exclusive
+    sustained_windows = int(np.ceil((SUSTAINED_S - WINDOW_S) / STRIDE_S)) + 1
     for a, b in zip(starts, ends):
         out["episodes"] += 1
         hit = np.flatnonzero(fired[a:b])
+        sustained = (b - a) >= sustained_windows
+        out["sus_episodes"] += int(sustained)
         if hit.size:
             out["caught"] += 1
+            out["sus_caught"] += int(sustained)
             out["delays"].append(int(hit[0]))
     return out
 
@@ -249,7 +261,8 @@ def main(argv=None) -> int:
     hours = defaultdict(float)
     n_rec = defaultdict(int)
     acc = defaultdict(lambda: {"false": 0, "true": 0, "episodes": 0,
-                               "caught": 0, "delays": []})
+                               "caught": 0, "delays": [],
+                               "sus_episodes": 0, "sus_caught": 0})
     per_record = defaultdict(lambda: defaultdict(int))
     t0 = time.time()
 
@@ -282,7 +295,8 @@ def main(argv=None) -> int:
                     for r in rules:
                         c = count_alarms(pred, truth, r)
                         k = acc[(ds, t, r, cfg)]
-                        for key in ("false", "true", "episodes", "caught"):
+                        for key in ("false", "true", "episodes", "caught",
+                                    "sus_episodes", "sus_caught"):
                             k[key] += c[key]
                         k["delays"] += c["delays"]
                         if cfg is None:
@@ -308,7 +322,7 @@ def main(argv=None) -> int:
     has_ep = any(acc[(d, t, r, cfg)]["episodes"] for d in used for t in a.thresholds
                  for r in rules for cfg in configs)
     if has_ep:
-        head += f"{'caught':>10}{'median delay':>14}"
+        head += f"{'caught':>10}{'sustained':>11}{'median delay':>14}"
     print(head)
     for t in a.thresholds:
         for r in rules:
@@ -327,7 +341,9 @@ def main(argv=None) -> int:
                     ca = sum(acc[(d, t, r, cfg)]["caught"] for d in used)
                     dl = [x for d in used for x in acc[(d, t, r, cfg)]["delays"]]
                     med = f"{np.median(dl) * step + 5:.0f} s" if dl else "-"
-                    row += f"{f'{ca}/{ep}':>10}{med:>14}"
+                    se = sum(acc[(d, t, r, cfg)]["sus_episodes"] for d in used)
+                    sc = sum(acc[(d, t, r, cfg)]["sus_caught"] for d in used)
+                    row += f"{f'{ca}/{ep}':>10}{f'{sc}/{se}':>11}{med:>14}"
                 print(row)
 
     t, r = a.thresholds[0], rules[0]
@@ -343,6 +359,7 @@ def main(argv=None) -> int:
     print("  Alarms overlapping annotated VF or fast VT count as true, not false.")
     if has_ep:
         print("  Delay is from episode onset to alarm, including the 5 s window.")
+        print(f"  Sustained: annotated shockable for {SUSTAINED_S:g} s or more.")
     if a.template:
         print("  veto m/b: vetoed when b beats match the patient template at m or above.")
     return 0
