@@ -246,9 +246,16 @@ def main(argv=None) -> int:
                     help="NSTDB noise, jitter and cutout on training batches")
     ap.add_argument("--noisy-eval", type=float, default=None, metavar="SNR_DB",
                     help="also score each held-out fold with NSTDB noise at this SNR")
+    ap.add_argument("--save-models", action="store_true",
+                    help="save each fold's selected model next to the OOF file")
+    ap.add_argument("--extra-negatives", type=Path, default=None,
+                    help="shockable only: .npz of extra negative windows added to "
+                         "every training fold (data/hard_negatives.py)")
     ap.add_argument("--device", default="auto")
     ap.add_argument("--seed", type=int, default=0)
     a = ap.parse_args(argv)
+    if a.extra_negatives and a.stage != "shockable":
+        ap.error("--extra-negatives applies to the shockable stage only")
 
     cfg = STAGES[a.stage]
     classes = list(cfg["classes"])
@@ -265,6 +272,17 @@ def main(argv=None) -> int:
         from ..data.train_augment import BANK_NAME, load_noise_bank, split_bank
         a._bank_train, a._bank_eval = split_bank(
             load_noise_bank(a.cache / BANK_NAME))
+    Xe = ye = None
+    if a.extra_negatives:
+        with np.load(a.extra_negatives, allow_pickle=False) as e:
+            Xe, ye = e["X"], e["y"].astype(str)
+            extra_patients = set(e["patient"].astype(str))
+        if set(ye) - {"not_shockable"}:
+            raise SystemExit("extra negatives must all be not_shockable")
+        shared = extra_patients & set(np.asarray(d["patient"], dtype=str))
+        if shared:
+            raise SystemExit(f"extra negatives share {len(shared)} patients with "
+                             f"the evaluation data - that would leak")
     y = np.asarray(d["y"], dtype=str)
     patients = np.asarray(d["patient"], dtype=str)
     folds = assign_folds(patients, a.folds, a.seed)
@@ -277,6 +295,9 @@ def main(argv=None) -> int:
     print(f"device      {device}")
     print(f"gamma       {a.gamma}  (focal; 0 = weighted cross-entropy)")
     print(f"augment     {'on (noise, jitter, cutout)' if a.augment else 'off'}")
+    if Xe is not None:
+        print(f"extra neg   {len(Xe):,} windows from {len(extra_patients)} patients, "
+              f"training folds only")
     if a.noisy_eval is not None:
         print(f"noisy eval  NSTDB at {a.noisy_eval:g} dB, held-out noise segments")
     print(f"selection   {cfg['select']}"
@@ -298,8 +319,15 @@ def main(argv=None) -> int:
         a._y_fold = y[te]
 
         t0 = time.time()
-        model, P = train_one_fold(a.stage, d["X"][tr], y[tr], d["X"][te],
+        Xtr, ytr = d["X"][tr], y[tr]
+        if Xe is not None:
+            Xtr = np.concatenate([Xtr, Xe.astype(Xtr.dtype)])
+            ytr = np.concatenate([ytr, ye])
+        model, P = train_one_fold(a.stage, Xtr, ytr, d["X"][te],
                                   device, a, classes)
+        if a.save_models:
+            a.out.mkdir(parents=True, exist_ok=True)
+            torch.save(model.state_dict(), a.out / f"{a.stage}_fold{f}.pt")
         pred = np.array([classes[i] for i in P.argmax(1)])
         score = P[:, classes.index(positive)]
 
