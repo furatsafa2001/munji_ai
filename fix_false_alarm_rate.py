@@ -45,7 +45,9 @@ NEW_SOURCE = r'''"""False alarms per 24 hours, on whole recordings no fold model
 
     python -m munji_ai.eval.false_alarm_rate --models checkpoints/shock_cv
     python -m munji_ai.eval.false_alarm_rate --models checkpoints/shock_cv \
-        --thresholds 0.5 0.55 0.6 --datasets nsrdb stdb
+        --thresholds 0.55 0.6 --rules 2/3 4/6 6/9 --datasets nsrdb stdb
+    python -m munji_ai.eval.false_alarm_rate --models checkpoints/shock_cv \
+        --rules 2/3 4/6 6/9 --datasets cudb vfdb        # the cost: delay, misses
 
 Why this number
 ---------------
@@ -65,6 +67,14 @@ No leakage
 Each recording is scored by the fold model that held its patient out, using
 the fold assignment saved in the out-of-fold file. Only patients in the train
 and val splits are used; the test split stays untouched.
+
+Longer confirmation
+-------------------
+--rules scores several N-of-M confirmation rules from one pass over the data.
+On arrest recordings (cudb, vfdb) the same table shows what a longer rule
+costs: episodes caught and the median delay from onset to alarm. Artifact is
+usually brief and fibrillation is not, so a longer rule should remove false
+alarms faster than it delays true ones; this measures whether it does.
 
 What it does not do
 -------------------
@@ -161,22 +171,36 @@ def truth_flags(rec, n: int) -> np.ndarray:
     return flags
 
 
-def count_alarms(pred: np.ndarray, truth: np.ndarray, rule) -> tuple[int, int]:
-    """(false, true) alarms under N-of-M; a run of confirmed windows is one alarm."""
+def count_alarms(pred: np.ndarray, truth: np.ndarray, rule) -> dict:
+    """Alarms under N-of-M; a run of confirmed windows is one alarm.
+
+    false   alarms whose confirming windows contain no annotated shockable one
+    true    alarms that do
+    episodes / caught / delays
+            contiguous runs of shockable windows, whether an alarm fired while
+            each was running, and how many windows after onset it fired
+    """
     n, m = rule
-    false_alarms = true_alarms = 0
-    prev = False
     csum = np.concatenate([[0], np.cumsum(pred)])
-    for i in range(len(pred)):
-        lo = max(0, i - m + 1)
-        fired = (csum[i + 1] - csum[lo]) >= n
-        if fired and not prev:
-            if truth[lo:i + 1].any():
-                true_alarms += 1
-            else:
-                false_alarms += 1
-        prev = fired
-    return false_alarms, true_alarms
+    idx = np.arange(len(pred))
+    fired = (csum[idx + 1] - csum[np.maximum(0, idx - m + 1)]) >= n
+    out = {"false": 0, "true": 0, "episodes": 0, "caught": 0, "delays": []}
+
+    for i in np.flatnonzero(fired):
+        if i == 0 or not fired[i - 1]:
+            lo = max(0, i - m + 1)
+            out["true" if truth[lo:i + 1].any() else "false"] += 1
+
+    t = np.concatenate([[False], truth, [False]])
+    starts = np.flatnonzero(~t[:-1] & t[1:])
+    ends = np.flatnonzero(t[:-1] & ~t[1:])          # exclusive
+    for a, b in zip(starts, ends):
+        out["episodes"] += 1
+        hit = np.flatnonzero(fired[a:b])
+        if hit.size:
+            out["caught"] += 1
+            out["delays"].append(int(hit[0]))
+    return out
 
 
 def main(argv=None) -> int:
@@ -185,6 +209,9 @@ def main(argv=None) -> int:
     ap.add_argument("--models", type=Path, required=True,
                     help="folder with shockable_fold*.pt and shockable_oof.npz")
     ap.add_argument("--thresholds", type=float, nargs="+", default=[0.5, 0.55, 0.6])
+    ap.add_argument("--rules", nargs="+", default=None, metavar="N/M",
+                    help="confirmation rules to compare, e.g. 2/3 4/6 6/9 "
+                         "(default: config.CONFIRMATION['vf'])")
     ap.add_argument("--datasets", nargs="+", default=list(DEFAULT_DATASETS))
     ap.add_argument("--cache", type=Path, default=CACHE_DIR)
     ap.add_argument("--raw", type=Path, default=RAW_DIR)
@@ -194,20 +221,26 @@ def main(argv=None) -> int:
     a = ap.parse_args(argv)
 
     device = torch.device(a.device)
-    rule = C.CONFIRMATION["vf"]
+    if a.rules:
+        rules = [tuple(int(v) for v in r.split("/")) for r in a.rules]
+    else:
+        rules = [tuple(C.CONFIRMATION["vf"])]
+    for n_, m_ in rules:
+        if not 1 <= n_ <= m_:
+            raise SystemExit(f"bad rule {n_}/{m_}: need 1 <= N <= M")
+    step = C.WINDOW_STRIDE_SEC["shockable"]
     folds = fold_of_records(a.models / "shockable_oof.npz", a.cache)
     models = load_fold_models(a.models, device)
     print(f"models      {len(models)} folds from {a.models}")
-    print(f"rule        {rule[0]} of {rule[1]} windows, stride "
-          f"{C.WINDOW_STRIDE_SEC['shockable']} s")
+    print(f"rules       " + "  ".join(f"{n_}/{m_} (~{(m_ - 1) * step + 5:g} s)"
+                                      for n_, m_ in rules))
     print(f"gate        not applied (upper bound on alarms)\n")
 
     hours = defaultdict(float)
     n_rec = defaultdict(int)
-    fa = defaultdict(int)                  # (dataset, threshold) -> false alarms
-    ta = defaultdict(int)
-    flagged = defaultdict(int)
-    windows = defaultdict(int)
+    acc = defaultdict(lambda: {"false": 0, "true": 0, "episodes": 0,
+                               "caught": 0, "delays": []})
+    per_record = defaultdict(lambda: defaultdict(int))
     t0 = time.time()
 
     for ds in a.datasets:
@@ -224,13 +257,15 @@ def main(argv=None) -> int:
             truth = truth_flags(rec, len(s))
             hours[ds] += len(rec.signal) / TARGET_FS / 3600
             n_rec[ds] += 1
-            windows[ds] += len(s)
             for t in a.thresholds:
                 pred = s >= t
-                f_, t_ = count_alarms(pred, truth, rule)
-                fa[(ds, t)] += f_
-                ta[(ds, t)] += t_
-                flagged[(ds, t)] += int((pred & ~truth).sum())
+                for r in rules:
+                    c = count_alarms(pred, truth, r)
+                    k = acc[(ds, t, r)]
+                    for key in ("false", "true", "episodes", "caught"):
+                        k[key] += c[key]
+                    k["delays"] += c["delays"]
+                    per_record[(t, r)][f"{ds}:{name}"] += c["false"]
             print(f"  {ds:<9} {j:>3}/{len(keys)}  {name:<10} "
                   f"{len(rec.signal) / TARGET_FS / 3600:5.1f} h   "
                   f"{time.time() - t0:6.0f} s elapsed", flush=True)
@@ -240,25 +275,43 @@ def main(argv=None) -> int:
         print("nothing scored")
         return 1
 
+    print(f"\n  false alarms per 24 h ({', '.join(f'{d} {hours[d]:.0f} h' for d in used)})")
+    head = f"  {'thr':>5}{'rule':>6}" + "".join(f"{d:>10}" for d in used) + f"{'all':>10}"
+    has_ep = any(acc[(d, t, r)]["episodes"] for d in used for t in a.thresholds
+                 for r in rules)
+    if has_ep:
+        head += f"{'caught':>10}{'median delay':>14}"
+    print(head)
     for t in a.thresholds:
-        print(f"\n  threshold {t:.2f}")
-        print(f"  {'dataset':<10}{'records':>8}{'hours':>8}{'false alarms':>14}"
-              f"{'per 24 h':>10}{'window FP rate':>16}")
-        tot_h = tot_fa = tot_w = tot_fl = 0
-        for ds in used:
-            per_day = fa[(ds, t)] / hours[ds] * 24
-            print(f"  {ds:<10}{n_rec[ds]:>8}{hours[ds]:>8.1f}{fa[(ds, t)]:>14}"
-                  f"{per_day:>10.2f}{flagged[(ds, t)] / max(windows[ds], 1):>16.4f}")
-            tot_h += hours[ds]
-            tot_fa += fa[(ds, t)]
-            tot_w += windows[ds]
-            tot_fl += flagged[(ds, t)]
-        print(f"  {'all':<10}{sum(n_rec[d] for d in used):>8}{tot_h:>8.1f}{tot_fa:>14}"
-              f"{tot_fa / tot_h * 24:>10.2f}{tot_fl / max(tot_w, 1):>16.4f}")
+        for r in rules:
+            row = f"  {t:>5.2f}{f'{r[0]}/{r[1]}':>6}"
+            tot = 0
+            for d in used:
+                fa = acc[(d, t, r)]["false"]
+                tot += fa
+                row += f"{fa / hours[d] * 24:>10.1f}"
+            row += f"{tot / sum(hours[d] for d in used) * 24:>10.1f}"
+            if has_ep:
+                ep = sum(acc[(d, t, r)]["episodes"] for d in used)
+                ca = sum(acc[(d, t, r)]["caught"] for d in used)
+                dl = [x for d in used for x in acc[(d, t, r)]["delays"]]
+                med = f"{np.median(dl) * step + 5:.0f} s" if dl else "-"
+                row += f"{f'{ca}/{ep}':>10}{med:>14}"
+            print(row)
+
+    t, r = a.thresholds[0], rules[0]
+    worst = sorted(per_record[(t, r)].items(), key=lambda kv: -kv[1])[:5]
+    if worst and worst[0][1]:
+        total = sum(per_record[(t, r)].values())
+        print(f"\n  records with the most false alarms (threshold {t:.2f}, rule {r[0]}/{r[1]})")
+        for name, fa in worst:
+            print(f"    {name:<16}{fa:>6}   {fa / max(total, 1):>5.0%} of all")
 
     print("\n" + "=" * 66)
     print("  Per 24 h is the rate a patient would feel with the gate off.")
     print("  Alarms overlapping annotated VF or fast VT count as true, not false.")
+    if has_ep:
+        print("  Delay is from episode onset to alarm, including the 5 s window.")
     return 0
 
 
