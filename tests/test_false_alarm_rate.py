@@ -52,16 +52,25 @@ def main() -> int:
     print("Alarm counting (2 of 3)\n")
     P = np.array([0, 1, 1, 1, 0, 0, 0, 1, 0, 1, 0, 0], dtype=bool)
     T = np.zeros_like(P)
-    f_, t_ = far.count_alarms(P, T, rule)
+    c = far.count_alarms(P, T, rule)
     check("one confirmed run is one alarm, scattered positives fire again",
-          (f_, t_) == (2, 0), f"false {f_}, true {t_}")
+          (c["false"], c["true"]) == (2, 0), f"false {c['false']}, true {c['true']}")
     T2 = T.copy()
     T2[1:4] = True
-    f2, t2 = far.count_alarms(P, T2, rule)
-    check("an alarm overlapping a real episode counts as true", (f2, t2) == (1, 1),
-          f"false {f2}, true {t2}")
-    check("no positives, no alarms",
-          far.count_alarms(np.zeros(20, bool), np.zeros(20, bool), rule) == (0, 0))
+    c2 = far.count_alarms(P, T2, rule)
+    check("an alarm overlapping a real episode counts as true",
+          (c2["false"], c2["true"]) == (1, 1), f"false {c2['false']}, true {c2['true']}")
+    check("the episode is counted and caught",
+          (c2["episodes"], c2["caught"]) == (1, 1))
+    check("delay counts windows from onset to the first alarm", c2["delays"] == [1],
+          f"{c2['delays']}")
+    c3 = far.count_alarms(P, T2, (3, 3))
+    check("a stricter rule still catches a 3-window episode", c3["caught"] == 1
+          and c3["delays"] == [2])
+    c4 = far.count_alarms(P, T2, (4, 4))
+    check("a rule longer than the episode misses it", c4["caught"] == 0)
+    z = far.count_alarms(np.zeros(20, bool), np.zeros(20, bool), rule)
+    check("no positives, no alarms", (z["false"], z["true"]) == (0, 0))
 
     print("\nWindowing\n")
     sig = ecg(60, C.TARGET_FS)
@@ -75,6 +84,61 @@ def main() -> int:
     check("one score per deployment-stride window", len(s) == expected,
           f"{len(s)} windows for 60 s")
     check("scores are probabilities", ((s >= 0) & (s <= 1)).all())
+
+    print("\nBeat template veto\n")
+    from scipy.signal import butter, filtfilt
+    from munji_ai.rules import beat_template as bt
+
+    def beats(seconds, hr, wide=False, seed=0):
+        rng = np.random.default_rng(seed)
+        fs = C.TARGET_FS
+        n = int(seconds * fs)
+        x = np.zeros(n)
+        t = 0.5
+        comps = ((0.12, -0.18, 0.022), (1.0, 0.0, 0.03 if wide else 0.010),
+                 (-0.25, 0.08 if wide else 0.04, 0.03 if wide else 0.012),
+                 (0.3, 0.25, 0.045))
+        while t < seconds - 0.5:
+            c = int(t * fs)
+            for amp, off, wid in comps:
+                k, w = int(off * fs), max(int(wid * fs), 1)
+                lo, hi = max(c + k - 4 * w, 0), min(c + k + 4 * w, n)
+                if hi > lo:
+                    x[lo:hi] += amp * np.exp(-0.5 * ((np.arange(lo, hi) - (c + k)) / w) ** 2)
+            t += 60 / hr * rng.uniform(0.98, 1.02)
+        return pp.model_path(x + rng.normal(0, 0.01, n), fs)
+
+    fs = C.TARGET_FS
+    nsr = beats(180, 72)
+    found = bt.build_template(nsr, fs)
+    check("a template is built from a clear minute", found is not None
+          and found[2] >= bt.MIN_QUALITY, f"quality {found[2]:.3f}" if found else "none")
+    tmpl = found[0]
+    check("no template when every stretch is excluded",
+          bt.build_template(nsr, fs, is_clear=lambda lo, hi: False) is None)
+    rng = np.random.default_rng(1)
+    b, a = butter(2, [1 / 125, 15 / 125], "band")
+    w = nsr[2500:2500 + 1250]
+    hits = 0
+    for _ in range(20):
+        nz = filtfilt(b, a, rng.normal(0, 1, 1250))
+        nz *= np.sqrt(np.mean(w ** 2) / np.mean(nz ** 2)) / 10 ** (3 / 20)
+        hits += bt.beats_present(w + nz, tmpl, 0.8, 3, fs)
+    check("beats are still found under 3 dB artifact", hits >= 18, f"{hits}/20")
+    t = np.arange(1250) / fs
+    wrong = 0
+    for _ in range(50):
+        vf = np.sin(2 * np.pi * rng.uniform(4, 7) * t + rng.uniform(0, 6)) \
+            * (1 + 0.4 * np.sin(2 * np.pi * 0.5 * t))
+        wrong += bt.beats_present(pp.model_path(vf + rng.normal(0, 0.05, 1250), fs),
+                                  tmpl, 0.7, 3, fs)
+    check("fibrillation-like waves are never mistaken for beats", wrong == 0,
+          f"{wrong}/50 vetoed")
+    vt = beats(10, 180, wide=True)[:1250]
+    check("wide VT does not match a narrow sinus template",
+          not bt.beats_present(vt, tmpl, 0.7, 3, fs),
+          f"best match {bt.ncc_trace(vt, tmpl).max():.2f}")
+    check("too few beats never veto", not bt.beats_present(w, tmpl, 0.8, 50, fs))
 
     print("\nEnd to end on a fake world\n")
     import wfdb
@@ -115,12 +179,34 @@ def main() -> int:
         with contextlib.redirect_stdout(buf):
             rc = far.main(["--models", str(models), "--cache", str(cache),
                            "--raw", str(raw), "--datasets", "nsrdb",
-                           "--thresholds", "0.5", "0.6"])
+                           "--thresholds", "0.5", "0.6", "--rules", "2/3", "4/6"])
         text = buf.getvalue()
-        check("runs end to end", rc == 0 and "per 24 h" in text)
-        check("both recordings scored, 20 minutes in total",
-              "nsrdb            2     0.3" in text)
-        check("a table per threshold", text.count("threshold 0.") == 2)
+        check("runs end to end", rc == 0 and "false alarms per 24 h" in text)
+        check("both recordings scored", text.count("  nsrdb  ") == 2
+              or text.count("nsrdb       ") >= 2)
+        rows = [l for l in text.splitlines()
+                if l.strip().startswith(("0.50", "0.60"))]
+        check("one row per threshold and rule", len(rows) == 4, f"{len(rows)} rows")
+
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = far.main(["--models", str(models), "--cache", str(cache),
+                           "--raw", str(raw), "--datasets", "nsrdb",
+                           "--thresholds", "0.5", "--rules", "2/3",
+                           "--template", "--ncc", "0.7", "0.8", "--min-beats", "3"])
+        text = buf.getvalue()
+        rows = [l for l in text.splitlines() if l.strip().startswith("0.50")]
+        check("template run adds a row per setting", rc == 0 and len(rows) == 3,
+              f"{len(rows)} rows")
+        check("template found in both recordings", "nsrdb 2/2 records" in text)
+        refused = False
+        with contextlib.redirect_stdout(io.StringIO()):
+            try:
+                far.main(["--models", str(models), "--cache", str(cache),
+                          "--raw", str(raw), "--rules", "5/3"])
+            except SystemExit:
+                refused = True
+        check("an impossible rule is refused", refused)
 
     print("\ncross_validate --save-models\n")
     from munji_ai.train import cross_validate as cv
