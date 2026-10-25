@@ -186,7 +186,7 @@ FAST_NARROW_BPM = 150
 # Confirmation windows — N of M consecutive positives before an alert fires.
 # A single window must never trigger a phone call.
 CONFIRMATION = {
-    "vf": (2, 3),
+    "vf": (4, 6),
     "asystole": (2, 3),
     "wide_complex": (3, 4),
     "extreme_brady": (3, 4),
