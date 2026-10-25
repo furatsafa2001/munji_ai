@@ -35,7 +35,7 @@ from torch.utils.data import DataLoader, TensorDataset
 
 from ..config import CACHE_DIR, CONFIRMATION, RHYTHM_CLASSES
 from ..data.windows import load_cache
-from ..eval.metrics import macro_f1, report
+from ..eval.metrics import macro_f1, per_class, report
 from ..models.rhythm_net import (SCORED_CLASSES, RhythmLoss, build,
                                  class_weights)
 
@@ -171,6 +171,23 @@ def evaluate(model, loader, device) -> tuple[np.ndarray, np.ndarray]:
     return pred, P[:, RHYTHM_CLASSES.index(POSITIVE)]
 
 
+def scored_f1(y_true, y_pred) -> tuple[float, float]:
+    """(macro F1 over SCORED_CLASSES, OTHER F1), every class scored against
+    every prediction.
+
+    macro_f1 with a subset of labels builds its confusion matrix over that
+    subset only, so windows predicted OTHER vanish from NSR's and AF's counts
+    and a model can look perfect by sending its hard windows to OTHER.
+    """
+    pc = per_class(y_true, y_pred, list(RHYTHM_CLASSES))
+
+    def f(c):
+        v = pc[c]["f1"]
+        return 0.0 if np.isnan(v) else float(v)
+
+    return float(np.mean([f(c) for c in SCORED_CLASSES])), f("OTHER")
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--cache", type=Path, default=CACHE_DIR)
@@ -263,8 +280,7 @@ def main(argv=None) -> int:
             total += loss.item()
 
         pred, _ = evaluate(model, val_loader, device)
-        f1 = macro_f1(y_va_str, pred, list(SCORED_CLASSES))
-        other_f1 = macro_f1(y_va_str, pred, ["OTHER"])
+        f1, other_f1 = scored_f1(y_va_str, pred)
         s = binary_scores(y_va_str, pred)
 
         mark = ""
