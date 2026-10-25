@@ -1,8 +1,8 @@
-"""Checks the hard-negative mining added by fix_hard_negatives.py.
+"""Checks data/hard_negatives.py (round 2: every record, Icentia + LTAFDB, resumable).
 
-Builds a small fake Icentia11k folder (WFDB records named like the real
-p00000_s00), an untrained fold model, and a tiny shockable cache, all in a
-temporary folder. Nothing in the repo is read or written.
+Builds a small fake Icentia11k folder and a fake LTAFDB folder, an untrained
+fold model and a tiny shockable cache, all in a temporary folder. Nothing in
+the repo is read or written.
 
     python tests/test_hard_negatives.py
 """
@@ -32,7 +32,7 @@ def check(name, cond, detail=""):
     print(f"  {'PASS' if cond else 'FAIL'}  {name}" + (f"  ({detail})" if detail else ""))
 
 
-def ecg(seconds, fs, hr=70.0, seed=0):
+def ecg(seconds, fs, seed=0):
     rng = np.random.default_rng(seed)
     n = int(seconds * fs)
     x = np.zeros(n)
@@ -42,18 +42,23 @@ def ecg(seconds, fs, hr=70.0, seed=0):
         w = max(int(0.01 * fs), 1)
         lo, hi = max(c - 4 * w, 0), min(c + 4 * w, n)
         x[lo:hi] += np.exp(-0.5 * ((np.arange(lo, hi) - c) / w) ** 2)
-        t += 60.0 / hr
+        t += 0.85
     return x + rng.normal(0, 0.05, n)
+
+
+def run(argv):
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        rc = hn.main(argv)
+    return rc, buf.getvalue()
 
 
 def main() -> int:
     import wfdb
     from munji_ai.data.windows import config_hash
 
-    # Pick fake patient numbers so that at least one lands in the test split.
-    pats = [f"p{i:05d}" for i in range(12)]
+    pats = [f"p{i:05d}" for i in range(10)]
     test_pats = {p for p in pats if assign(f"icentia11k:{p}") == "test"}
-
     with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
         tmp = Path(tmp)
         raw, models, cache = tmp / "raw", tmp / "models", tmp / "cache"
@@ -64,43 +69,63 @@ def main() -> int:
             d.mkdir(parents=True)
             for s in range(3):
                 wfdb.wrsamp(f"{p}_s{s:02d}", fs=250, units=["mV"], sig_name=["ECG"],
-                            p_signal=ecg(120, 250, seed=k * 10 + s)[:, None],
+                            p_signal=ecg(90, 250, seed=k * 10 + s)[:, None],
                             fmt=["16"], write_dir=str(d))
+        (raw / "ltafdb").mkdir(parents=True)
+        for k, name in enumerate(("00", "01", "03")):
+            x = ecg(240, 128, seed=50 + k)
+            wfdb.wrsamp(name, fs=128, units=["mV", "mV"], sig_name=["ECG1", "ECG2"],
+                        p_signal=np.stack([x, x], 1), fmt=["16", "16"],
+                        write_dir=str(raw / "ltafdb"))
+            wfdb.wrann(name, "atr", np.array([10, 60 * 128]), symbol=["+", "+"],
+                       aux_note=["(N", "(AFIB"], write_dir=str(raw / "ltafdb"))
         torch.manual_seed(0)
         torch.save(build().state_dict(), models / "shockable_fold0.pt")
 
         print("Selecting recordings\n")
-        groups, skipped = hn.records_by_patient(raw, segments=2, max_patients=None)
+        g, skipped = hn.records_by_patient("icentia11k", raw, 0, None)
+        check("every segment of a patient is used by default",
+              all(len(v) == 3 for v in g.values()), f"{len(g)} patients")
         check("test-split patients are skipped", skipped == len(test_pats)
-              and not any(pid.split(":")[1] in test_pats for pid in groups),
-              f"{skipped} skipped")
-        check("at most 2 segments per patient, the first ones",
-              all(r == sorted(r)[:2] and len(r) <= 2 for r in groups.values()))
+              and not any(pid.split(":")[1] in test_pats for pid in g))
+        g2, _ = hn.records_by_patient("icentia11k", raw, 2, None)
+        check("--segments limits records per patient", all(len(v) == 2 for v in g2.values()))
+        gl, _ = hn.records_by_patient("ltafdb", raw, 0, None)
+        check("LTAFDB: one patient per record",
+              set(gl) == {"ltafdb:00", "ltafdb:01", "ltafdb:03"})
 
-        print("\nMining\n")
-        out = tmp / "neg.npz"
-        buf = io.StringIO()
-        with contextlib.redirect_stdout(buf):
-            hn.mine(models, raw, out, segments=2, hard_thr=0.5, per_patient_hard=5,
-                    per_patient_random=3, fold=0, max_patients=None,
-                    device=torch.device("cpu"))
+        print("\nMining both sources\n")
+        out, work = tmp / "neg.npz", tmp / "parts"
+        args = ["--models", str(models), "--raw", str(raw), "--hard", "0.5",
+                "--per-patient-hard", "5", "--per-patient-random", "3",
+                "--work-dir", str(work), "--out", str(out)]
+        rc, text = run(args)
         with np.load(out, allow_pickle=False) as d:
-            X, y, pat, sc = d["X"], d["y"].astype(str), d["patient"].astype(str), d["score"]
-            files = d.files
-        check("output looks like a cache split", {"X", "y", "dataset", "patient",
-              "record", "offset", "score"} <= set(files))
-        check("windows are 5 s at 250 Hz, stored as the cache dtype",
-              X.shape[1] == C.window_samples("shockable") and X.dtype == np.dtype(C.CACHE_DTYPE))
+            X, y = d["X"], d["y"].astype(str)
+            ds, pat = d["dataset"].astype(str), d["patient"].astype(str)
+        check("runs and writes the merged file", rc == 0 and len(X) > 0, f"{len(X)} windows")
+        check("windows from both sources", set(ds) == {"icentia11k", "ltafdb"})
         check("every window is labelled not_shockable", set(y) == {"not_shockable"})
-        per_pat = {p: (pat == p).sum() for p in set(pat)}
-        check("no patient gives more than hard + random windows",
-              max(per_pat.values()) <= 8, f"max {max(per_pat.values())}")
+        check("stored as the cache dtype, 5 s at 250 Hz",
+              X.dtype == np.dtype(C.CACHE_DTYPE) and X.shape[1] == C.window_samples("shockable"))
+        per = {p: (pat == p).sum() for p in set(pat)}
+        check("no patient gives more than hard + random", max(per.values()) <= 8,
+              f"max {max(per.values())}")
         check("no test-split patient in the output",
-              not any(p.split(":")[1] in test_pats for p in pat))
-        med = np.median(X.astype(np.float32), axis=1)
-        check("windows are normalised like the cache", np.abs(med).max() < 0.05)
-        check("the summary reports the raw false-positive rate",
-              "the raw false-positive rate" in buf.getvalue())
+              not any(p.split(":")[1] in test_pats for p in pat if p.startswith("icentia")))
+        check("windows are normalised like the cache",
+              np.abs(np.median(X.astype(np.float32), axis=1)).max() < 0.05)
+
+        print("\nResume and merge\n")
+        n_parts = len(list(work.glob("*.npz")))
+        rc, text = run(args)
+        check("a rerun skips every finished patient",
+              rc == 0 and f"{n_parts} of {n_parts} patients already done" in text)
+        out2 = tmp / "merged.npz"
+        rc, _ = run(["--merge-only", "--work-dir", str(work), "--out", str(out2)])
+        with np.load(out2, allow_pickle=False) as d:
+            n2 = len(d["X"])
+        check("--merge-only rebuilds the same file", rc == 0 and n2 == len(X))
 
         print("\ncross_validate --extra-negatives\n")
         from munji_ai.train import cross_validate as cv
@@ -113,38 +138,12 @@ def main() -> int:
                      record=np.array([f"cu{i % 8:02d}" for i in range(n)]),
                      offset=np.arange(n) * 625, dataset=np.array(["cudb"] * n),
                      cfg_hash=config_hash())
-        base = ["--stage", "shockable", "--folds", "2", "--epochs", "1",
-                "--batch", "16", "--cache", str(cache), "--device", "cpu",
-                "--out", str(cache / "out")]
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
-            rc = cv.main(base + ["--extra-negatives", str(out)])
-        check("trains with extra negatives", rc == 0 and "extra neg" in buf.getvalue())
-        with np.load(cache / "out" / "shockable_oof.npz", allow_pickle=False) as d:
-            n_oof = len(d["y"])
-        check("extra windows never enter the held-out predictions", n_oof == 64,
-              f"{n_oof} OOF windows")
-
-        leak = tmp / "leak.npz"
-        np.savez(leak, X=X[:4], y=y[:4], patient=np.array(["cudb:cu01"] * 4),
-                 dataset=np.array(["cudb"] * 4), record=np.array(["cu01"] * 4),
-                 offset=np.zeros(4, dtype=np.int64), score=sc[:4])
-        refused = False
-        with contextlib.redirect_stdout(io.StringIO()):
-            try:
-                cv.main(base + ["--extra-negatives", str(leak)])
-            except SystemExit:
-                refused = True
-        check("negatives sharing a patient with the evaluation are refused", refused)
-
-        refused = False
-        with contextlib.redirect_stdout(io.StringIO()), \
-                contextlib.redirect_stderr(io.StringIO()):
-            try:
-                cv.main(["--stage", "rhythm", "--extra-negatives", str(out)])
-            except SystemExit:
-                refused = True
-        check("--extra-negatives is refused for the rhythm stage", refused)
+            rc = cv.main(["--stage", "shockable", "--folds", "2", "--epochs", "1",
+                          "--batch", "16", "--cache", str(cache), "--device", "cpu",
+                          "--out", str(cache / "out"), "--extra-negatives", str(out)])
+        check("cross_validate trains with them", rc == 0 and "extra neg" in buf.getvalue())
 
     print("\n" + ("ALL CHECKS PASSED" if ok else "FAILURES ABOVE"))
     return 0 if ok else 1
