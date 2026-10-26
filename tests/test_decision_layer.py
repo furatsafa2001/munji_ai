@@ -1,0 +1,149 @@
+"""The decision layer's behaviour, one rule per check.
+
+These are the cases the Dart port in the app must reproduce exactly.
+
+    python tests/test_decision_layer.py
+"""
+
+import sys
+from pathlib import Path
+
+import numpy as np
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from munji_ai.decision.decision_layer import DecisionLayer, is_organised, DecisionConfig
+from munji_ai.rules.rate_engine import Finding, RateReport
+
+ok = True
+
+
+def check(name, cond, detail=""):
+    global ok
+    ok = ok and bool(cond)
+    print(f"  {'PASS' if cond else 'FAIL'}  {name}" + (f"  ({detail})" if detail else ""))
+
+
+def organised(bpm=180.0):
+    rr = np.full(14, 60.0 / bpm)
+    return RateReport(bpm=bpm, rr_sec=rr, qrs_ms=150.0, n_beats=15)
+
+
+def chaotic():
+    rr = np.random.default_rng(0).uniform(0.15, 0.6, 12)
+    return RateReport(bpm=float(60 / np.median(rr)), rr_sec=rr, qrs_ms=np.nan, n_beats=13)
+
+
+def kinds(alerts):
+    return [a.kind for a in alerts]
+
+
+def run_shock(dl, ps, rate=None, lead_off=False, t0=0.0):
+    out = []
+    for i, p in enumerate(ps):
+        out += dl.on_shockable(t0 + i * 2.5, p, rate, lead_off=lead_off)
+    return out
+
+
+def main() -> int:
+    print("Shockable: confirmation and naming\n")
+    dl = DecisionLayer()
+    a = run_shock(dl, [0.9, 0.9, 0.9], chaotic())
+    check("3 positive windows are not enough", a == [])
+    a = run_shock(dl, [0.9], chaotic(), t0=7.5)
+    check("the 4th of 6 fires one alert", kinds(a) == ["VF"])
+    a = run_shock(dl, [0.9] * 10, chaotic(), t0=10)
+    check("no repeat while the episode lasts", a == [])
+    a = run_shock(dl, [0.1] * 12 + [0.9] * 4, chaotic(), t0=40)
+    check("a new episode after 30 s of quiet fires again", kinds(a) == ["VF"])
+
+    dl = DecisionLayer()
+    check("organised, fast, regular beats are named WCT",
+          kinds(run_shock(dl, [0.9] * 4, organised())) == ["WCT"])
+    dl = DecisionLayer()
+    check("no rate report at all is named VF", kinds(run_shock(dl, [0.9] * 4)) == ["VF"])
+    dl = DecisionLayer()
+    check("0.59 never fires", run_shock(dl, [0.59] * 20, chaotic()) == [])
+    check("organisation test", is_organised(organised(), DecisionConfig())
+          and not is_organised(chaotic(), DecisionConfig())
+          and not is_organised(organised(bpm=80), DecisionConfig()))
+
+    print("\nLead-off\n")
+    dl = DecisionLayer()
+    a = run_shock(dl, [0.9] * 8, chaotic(), lead_off=True)
+    check("a detached patch silences VF and asks for the patch once",
+          kinds(a) == ["check_patch"])
+    dl2 = DecisionLayer()
+    out = []
+    for i in range(4):
+        out += dl2.on_shockable(i * 2.5, 0.9, chaotic(), usable=False)
+    check("4 positive windows marked unusable still raise VF", kinds(out) == ["VF"])
+
+    print("\nAF\n")
+    dl = DecisionLayer()
+    out = []
+    for i in range(10):
+        out += dl.on_rhythm(i * 15, (0.1, 0.8, 0.1))
+    check("4 AF windows of 6 raise one AF/AFL alert", kinds(out) == ["AF/AFL"])
+    out = []
+    for i in range(60):
+        out += dl.on_rhythm(150 + i * 15, (0.9, 0.05, 0.05))
+    for i in range(6):
+        out += dl.on_rhythm(1200 + i * 15, (0.1, 0.8, 0.1))
+    check("a new AF episode within 24 h is not re-alerted", out == [])
+    out = []
+    for i in range(60):
+        out += dl.on_rhythm(3000 + i * 15, (0.9, 0.05, 0.05))
+    for i in range(6):
+        out += dl.on_rhythm(90000 + i * 15, (0.1, 0.8, 0.1))
+    check("after 24 h it may alert again", kinds(out) == ["AF/AFL"])
+    r = dl.report()
+    check("every AF window counts in the burden", r["af_windows"] == 22
+          and abs(r["af_burden"] - 22 / r["rhythm_windows"]) < 1e-9,
+          f"{r['af_windows']} AF of {r['rhythm_windows']}")
+
+    dl = DecisionLayer()
+    out = []
+    for i in range(10):
+        out += dl.on_rhythm(i * 15, (0.1, 0.1, 0.8))
+    check("OTHER is never alerted, only counted", out == [] and dl.report()["other_windows"] == 10)
+    dl = DecisionLayer()
+    out = []
+    for i in range(10):
+        out += dl.on_rhythm(i * 15, (0.1, 0.8, 0.1), usable=False)
+    check("unusable windows neither alert nor count", out == []
+          and dl.report()["rhythm_windows"] == 0)
+
+    print("\nPriority\n")
+    dl = DecisionLayer()
+    run_shock(dl, [0.9] * 4, chaotic())
+    out = []
+    for i in range(6):
+        out += dl.on_rhythm(10 + i * 15, (0.1, 0.8, 0.1))
+    check("no AF alert while a VF episode is active", out == [])
+
+    print("\nRate rules\n")
+    dl = DecisionLayer()
+    flat = RateReport(flat=True, findings=[Finding("asystole", "critical", 5.0, gated=True)])
+    out = []
+    for i in range(4):
+        out += dl.on_rate(i * 2.5, flat, usable=False)
+    check("asystole on unusable windows is not alerted", out == [])
+    out = []
+    for i in range(4):
+        out += dl.on_rate(10 + i * 2.5, flat, usable=True)
+    check("asystole on usable windows is alerted once", kinds(out) == ["asystole"])
+    dl = DecisionLayer()
+    slow = RateReport(bpm=35, findings=[Finding("extreme_bradycardia", "critical", 35)])
+    out = []
+    for i in range(6):
+        out += dl.on_rate(i * 2.5, slow)
+    check("a rate finding is confirmed by its own rule and alerted once",
+          kinds(out) == ["extreme_bradycardia"])
+
+    print("\n" + ("ALL CHECKS PASSED" if ok else "FAILURES ABOVE"))
+    return 0 if ok else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
