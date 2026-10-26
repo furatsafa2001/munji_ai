@@ -192,6 +192,6 @@ CONFIRMATION = {
     "extreme_brady": (3, 4),
     "extreme_tachy": (3, 4),
     "pause": (2, 3),
-    "af": (2, 3),
+    "af": (4, 6),
     "fast_narrow": (3, 4),
 }
