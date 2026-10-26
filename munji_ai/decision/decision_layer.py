@@ -3,6 +3,7 @@
     from munji_ai.decision.decision_layer import DecisionLayer
     dl = DecisionLayer()
     alerts = dl.on_shockable(t, p_shockable, rate_report, lead_off=False)
+    # call on_shockable before on_rate for the same window
     alerts = dl.on_rhythm(t, (p_nsr, p_af, p_other), usable=True, lead_off=False)
     alerts = dl.on_rate(t, rate_report, usable=True, lead_off=False)
     summary = dl.report()            # AF burden and counts for the doctor's PDF
@@ -27,12 +28,15 @@ Shockable (ShockableNet, every 2.5 s)
     full-day cross-validation: no sustained episode missed, about 0.5 false
     alarms per patient-day.
 
-    Naming follows the client's own definitions: VF has no organised QRS;
-    wide-complex tachycardia is organised and fast. The confirming windows'
-    rate reports decide: if most show organised beats (enough beats, regular
-    spacing, rate 100 to 300 bpm), the alert is WCT, otherwise VF. These
-    organisation thresholds are proposals until replayed against annotated
-    VF and VT episodes.
+    The alert is named VF/VT: a life-threatening ventricular rhythm. Telling
+    VF from fast VT was tried four ways on CUDB and VFDB, by patient: rate
+    and regularity from the rate engine, dominant frequency and spectral
+    peak size from the literature, published complexity measures, and a
+    classifier on ShockableNet's own features. None separated them (AUC 0.3
+    to 0.6) with VT from only 8 recordings. Both rhythms need the same
+    response, an emergency call, so one honest name is safer than a guess.
+    Separate names return if more VT data (PhysioNet VTaC) makes them
+    reliable.
 
     The quality gate does NOT silence it. Measured on this project's data,
     artifact-free criteria discarded about 60% of genuine VF windows: VF looks
@@ -54,8 +58,15 @@ Rate rules (rate engine)
     an attached electrode, since a loose patch also reads flat.
 
 Priority
-    While a VF or WCT episode is active, AF and rate warnings are held back:
-    the person is already being told the most urgent thing.
+    While a VF/VT episode is active, AF and rate warnings are held back: the
+    person is already being told the most urgent thing.
+
+    Fast-narrow (SVT) and wide-complex findings from the rate engine are held
+    whenever ShockableNet saw a shockable window in the last 6. On 429 real
+    fast-VT windows the rate engine called 22% "fast narrow" and only 14%
+    "wide complex": its beat detector and QRS width are built for normal
+    beats. Calling VT "SVT" could mislead treatment, so ShockableNet's view
+    wins whenever it sees ventricular danger.
 
 Lead-off
     4 lead-off windows in the last 6 raise one "check the patch" notice per
@@ -85,9 +96,7 @@ class DecisionConfig:
     af_realert_s: float = 24 * 3600.0     # at most one AF alert per this many seconds
     lead_off_rule: tuple = (4, 6)
     gate_shockable_on_quality: bool = False
-    organised_min_beats: int = 5          # in a 5 s window: at least 60 bpm worth
-    organised_max_rr_cv: float = 0.20     # regular spacing
-    organised_bpm: tuple = (100.0, 300.0)
+    ventricular_hold: tuple = ("fast_narrow", "wide_complex")
     rate_episode_end: int = 6
 
 
@@ -126,26 +135,12 @@ class _Episode:
         return False
 
 
-def is_organised(rate, cfg: DecisionConfig) -> bool:
-    """Organised ventricular activity: enough beats, regular, fast. VF has none."""
-    if rate is None or getattr(rate, "flat", False):
-        return False
-    rr = np.asarray(getattr(rate, "rr_sec", []), dtype=float)
-    if getattr(rate, "n_beats", 0) < cfg.organised_min_beats or rr.size < 3:
-        return False
-    bpm = getattr(rate, "bpm", float("nan"))
-    if not (cfg.organised_bpm[0] <= bpm <= cfg.organised_bpm[1]):
-        return False
-    cv = float(np.std(rr) / np.mean(rr)) if np.mean(rr) > 0 else np.inf
-    return cv <= cfg.organised_max_rr_cv
-
-
 class DecisionLayer:
     def __init__(self, cfg: DecisionConfig | None = None):
         self.cfg = cfg or DecisionConfig()
         c = self.cfg
         self._shock = _Episode(c.shock_rule, c.shock_episode_end)
-        self._shock_rates: deque = deque(maxlen=c.shock_rule[1])
+        self._shock_recent: deque = deque(maxlen=c.shock_rule[1])
         self._af = _Episode(c.af_rule, c.af_episode_end)
         self._lead = _Episode(c.lead_off_rule, c.shock_episode_end)
         self._rate: dict = {}
@@ -164,19 +159,14 @@ class DecisionLayer:
                              "the patch seems detached; press it back on"))
         silenced = lead_off or (self.cfg.gate_shockable_on_quality and not usable)
         positive = (not silenced) and p_shockable >= self.cfg.shock_threshold
-        self._shock_rates.append(rate if positive else None)
+        self._shock_recent.append(positive)
         if self._shock.step(positive):
-            confirming = [r for r in self._shock_rates if r is not None]
-            organised = sum(is_organised(r, self.cfg) for r in confirming)
-            kind = "WCT" if organised * 2 > len(confirming) else "VF"
-            bpms = [r.bpm for r in confirming if r is not None and np.isfinite(r.bpm)]
-            out.append(Alert(t, kind, "critical", "shockable",
-                             "ventricular fibrillation" if kind == "VF"
-                             else "wide-complex tachycardia, ventricular until excluded",
+            bpm = getattr(rate, "bpm", float("nan")) if rate is not None else float("nan")
+            out.append(Alert(t, "VF/VT", "critical", "shockable",
+                             "life-threatening ventricular rhythm: ventricular "
+                             "fibrillation or tachycardia",
                              {"p_shockable": float(p_shockable),
-                              "organised_windows": int(organised),
-                              "confirming_windows": len(confirming),
-                              "median_bpm": float(np.median(bpms)) if bpms else None}))
+                              "bpm": float(bpm) if np.isfinite(bpm) else None}))
         return self._emit(out)
 
     def on_rhythm(self, t: float, probs, usable: bool = True,
@@ -209,6 +199,8 @@ class DecisionLayer:
         for kind in sorted(kinds):
             f = present.get(kind)
             ok = f is not None and (not f.gated or (usable and not lead_off))
+            if kind in self.cfg.ventricular_hold and self.ventricular_activity():
+                ok = False
             ep = self._rate.get(kind)
             if ep is None:
                 rule = tuple(C.CONFIRMATION.get(_rule_key(kind), (2, 3)))
@@ -219,6 +211,10 @@ class DecisionLayer:
                 out.append(Alert(t, kind, f.severity, "rate", f.detail,
                                  {"value": float(f.value)}))
         return self._emit(out)
+
+    def ventricular_activity(self) -> bool:
+        """ShockableNet saw danger recently, or its episode is still open."""
+        return self._shock.active or any(self._shock_recent)
 
     # --------------------------------------------------------------- outputs
     def report(self) -> dict:

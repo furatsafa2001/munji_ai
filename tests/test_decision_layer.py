@@ -12,7 +12,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from munji_ai.decision.decision_layer import DecisionLayer, is_organised, DecisionConfig
+from munji_ai.decision.decision_layer import DecisionLayer
 from munji_ai.rules.rate_engine import Finding, RateReport
 
 ok = True
@@ -51,22 +51,17 @@ def main() -> int:
     a = run_shock(dl, [0.9, 0.9, 0.9], chaotic())
     check("3 positive windows are not enough", a == [])
     a = run_shock(dl, [0.9], chaotic(), t0=7.5)
-    check("the 4th of 6 fires one alert", kinds(a) == ["VF"])
+    check("the 4th of 6 fires one VF/VT alert", kinds(a) == ["VF/VT"])
+    check("it is critical", a and a[0].severity == "critical")
     a = run_shock(dl, [0.9] * 10, chaotic(), t0=10)
     check("no repeat while the episode lasts", a == [])
     a = run_shock(dl, [0.1] * 12 + [0.9] * 4, chaotic(), t0=40)
-    check("a new episode after 30 s of quiet fires again", kinds(a) == ["VF"])
-
+    check("a new episode after 30 s of quiet fires again", kinds(a) == ["VF/VT"])
     dl = DecisionLayer()
-    check("organised, fast, regular beats are named WCT",
-          kinds(run_shock(dl, [0.9] * 4, organised())) == ["WCT"])
-    dl = DecisionLayer()
-    check("no rate report at all is named VF", kinds(run_shock(dl, [0.9] * 4)) == ["VF"])
+    check("organised fast beats are still VF/VT, never guessed apart",
+          kinds(run_shock(dl, [0.9] * 4, organised())) == ["VF/VT"])
     dl = DecisionLayer()
     check("0.59 never fires", run_shock(dl, [0.59] * 20, chaotic()) == [])
-    check("organisation test", is_organised(organised(), DecisionConfig())
-          and not is_organised(chaotic(), DecisionConfig())
-          and not is_organised(organised(bpm=80), DecisionConfig()))
 
     print("\nLead-off\n")
     dl = DecisionLayer()
@@ -77,7 +72,7 @@ def main() -> int:
     out = []
     for i in range(4):
         out += dl2.on_shockable(i * 2.5, 0.9, chaotic(), usable=False)
-    check("4 positive windows marked unusable still raise VF", kinds(out) == ["VF"])
+    check("4 positive windows marked unusable still raise VF/VT", kinds(out) == ["VF/VT"])
 
     print("\nAF\n")
     dl = DecisionLayer()
@@ -140,6 +135,37 @@ def main() -> int:
         out += dl.on_rate(i * 2.5, slow)
     check("a rate finding is confirmed by its own rule and alerted once",
           kinds(out) == ["extreme_bradycardia"])
+
+    print("\nVentricular hold on rate findings\n")
+    narrow = RateReport(bpm=180, findings=[Finding("fast_narrow", "warning", 180)])
+    wide = RateReport(bpm=180, findings=[Finding("wide_complex", "critical", 180)])
+    dl = DecisionLayer()
+    out = []
+    for i in range(6):
+        out += dl.on_shockable(i * 2.5, 0.9 if i == 0 else 0.2, organised())
+        out += dl.on_rate(i * 2.5, narrow)
+    check("no SVT alert while ShockableNet saw danger in the last 6 windows",
+          "fast_narrow" not in kinds(out))
+    out = []
+    for i in range(6, 12):
+        out += dl.on_shockable(i * 2.5, 0.1, organised())
+        out += dl.on_rate(i * 2.5, narrow)
+    check("SVT is alerted once ShockableNet has been quiet for 6 windows",
+          kinds(out) == ["fast_narrow"])
+    dl = DecisionLayer()
+    out = []
+    for i in range(8):
+        out += dl.on_shockable(i * 2.5, 0.9, organised())
+        out += dl.on_rate(i * 2.5, wide)
+    check("a wide-complex finding during VF/VT does not raise a second alert",
+          kinds(out) == ["VF/VT"])
+    dl = DecisionLayer()
+    out = []
+    for i in range(6):
+        out += dl.on_shockable(i * 2.5, 0.1, organised())
+        out += dl.on_rate(i * 2.5, wide)
+    check("wide complex alone, ShockableNet quiet, is still alerted (slow VT)",
+          kinds(out) == ["wide_complex"])
 
     print("\n" + ("ALL CHECKS PASSED" if ok else "FAILURES ABOVE"))
     return 0 if ok else 1
