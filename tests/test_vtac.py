@@ -49,7 +49,7 @@ def main() -> int:
     def fake_csv(name):
         return labels if name == "event_labels.csv" else splits
 
-    def fake_read(record, event):
+    def fake_read(record, event, start_s=None):
         calls.append(event)
         fs = 250
         t = np.arange(int(40 * fs)) / fs
@@ -81,6 +81,19 @@ def main() -> int:
             tr = set(d["record"][d["decision"]])
             check("--false adds false alarms, same patients first",
                   (~d["decision"]).sum() == 2 and fr <= tr, f"false from {sorted(fr)}, true {sorted(tr)}")
+            starts = []
+            def fake_read_b(record, event, start_s=None):
+                starts.append(start_s)
+                return fake_read(record, event)
+            vtac.read_event = fake_read_b
+            with contextlib.redirect_stdout(io.StringIO()):
+                vtac.main(["--cache", str(cache), "--limit", "6", "--false", "3",
+                           "--baseline", "--workers", "2"])
+            b = np.load(cache / "vtac_baseline.npz")
+            check("--baseline: one slice per patient, from 60 s",
+                  len(b["record"]) == len(set(b["record"])) and set(starts) == {60.0},
+                  f"{len(b['record'])} slices, starts {set(starts)}")
+            vtac.read_event = fake_read
             with contextlib.redirect_stdout(io.StringIO()):
                 vtac.main(["--cache", str(cache), "--all", "--workers", "2"])
             d = np.load(cache / "vtac_windows.npz")

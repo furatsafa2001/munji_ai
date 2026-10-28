@@ -76,6 +76,60 @@ def main() -> int:
         a = float(line[0].split()[3]) if line else 0.0
         check("learns separable synthetic VT and artifact", a > 0.9, f"test AUC {a:.3f}")
 
+        print("\nWith baseline rhythm as negatives\n")
+        Xb = []
+        for p in range(30):
+            x = np.random.default_rng(p).normal(0, 0.01, 10000)
+            t = 0.3
+            while t < 39.7:
+                c, w = int(t * 250), 2
+                x[c - 8:c + 8] += np.exp(-0.5 * (np.arange(-8, 8) / w) ** 2)
+                t += 60 / 70
+            Xb.append(x)
+        np.savez(tmp / "base.npz", X=np.stack(Xb).astype(np.float32),
+                 record=np.array([f"p{p}" for p in range(30)]),
+                 split=np.array(["test" if p >= 24 else "train" for p in range(30)]))
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = vd.main(["--vtac", str(tmp / "vtac.npz"), "--baseline", str(tmp / "base.npz"),
+                          "--epochs", "3", "--folds", "3", "--device", "cpu",
+                          "--out", str(tmp / "out2")])
+        text = buf.getvalue()
+        check("runs with --baseline", rc == 0 and "baseline    30 slices" in text,
+              text.splitlines()[0] if text else "")
+        check("reports VT against baseline rhythm separately",
+              "against the patients' baseline rhythm" in text and "baseline rhythm called VT" in text)
+
+        print("\nWith Holter VT, VF and other windows\n")
+        rng2 = np.random.default_rng(5)
+        Wl, lab, grp, bpm = [], [], [], []
+        for r in range(12):
+            for j in range(6):
+                kind = ("VT", "VF", "other")[j % 3]
+                if kind == "VT":
+                    w = vt(rng2, 120 + 5 * r, n=2500)
+                elif kind == "VF":
+                    t = np.arange(2500) / 250
+                    w = np.sin(2 * np.pi * (4 + rng2.random()) * t) * rng2.random(2500)
+                else:
+                    w = vt(rng2, 70, n=2500) * 0.5
+                Wl.append(w.astype(np.float16)); lab.append(kind)
+                grp.append(f"cudb:r{r}"); bpm.append(130.0 if kind == "VT" else np.nan)
+        np.savez(tmp / "holter.npz", X=np.stack(Wl), label=np.array(lab), group=np.array(grp),
+                 dataset=np.array(["cudb"] * len(lab)), bpm=np.array(bpm))
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = vd.main(["--vtac", str(tmp / "vtac.npz"), "--holter", str(tmp / "holter.npz"),
+                          "--epochs", "3", "--folds", "3", "--device", "cpu",
+                          "--out", str(tmp / "out3")])
+        text = buf.getvalue()
+        check("runs with --holter", rc == 0 and "holter      72 windows" in text,
+              [l for l in text.splitlines() if l.startswith("holter")])
+        check("reports VT against VF (naming) on held-out patients",
+              "AUC, VT against VF (naming)" in text and "holter AUC" in text)
+        ck = torch.load(tmp / "out3" / "vt_detector.pt", map_location="cpu", weights_only=False)
+        check("checkpoint records Holter training", ck.get("holter") is True)
+
     print("\n" + ("ALL CHECKS PASSED" if ok else "FAILURES ABOVE"))
     return 0 if ok else 1
 

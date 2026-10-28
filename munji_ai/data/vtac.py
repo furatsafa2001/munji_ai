@@ -3,6 +3,8 @@
     python -m munji_ai.data.vtac                         # true alarms (confirmed VT)
     python -m munji_ai.data.vtac --limit 700 --false 700 # plus 700 false alarms
     python -m munji_ai.data.vtac --all                   # everything
+    python -m munji_ai.data.vtac --limit 700 --false 700 --baseline
+                                   # the patients' own rhythm, a minute in
 
 Source: PhysioNet VTaC v1.1, 5,037 VT alarms from ICU bedside monitors, each
 labelled true or false by at least two expert annotators. A VT episode there
@@ -25,6 +27,13 @@ Output: data/cache/vtac_windows.npz
     decision  True for a confirmed VT alarm, False for a false alarm
     split     train / val / test, from the authors' benchmark split
     lead      the ECG lead used
+
+With --baseline, one 40 s slice per patient is read from 60 s into the
+recording, four minutes before the alarm, into vtac_baseline.npz: the
+patient's ordinary rhythm on the same monitor. A VT detector trained only on
+true against false alarms never sees a normal heart, and in daily life it
+called normal rhythm VT. Some of these slices will hold the patient's own
+non-sustained VT; that label noise is accepted and reported.
 
 Resumable: every event is saved in data/cache/vtac_parts/ as soon as it is
 read, so an interrupted run continues where it stopped. Events whose slice is
@@ -55,6 +64,7 @@ PN_DIR = "vtac/1.1/annotated_waveforms"
 LEAD_ORDER = ("V", "V5", "V2", "II", "I", "III", "aVF", "aVL", "aVR", "MCL")
 ALARM_S = 300.0
 BEFORE_S, AFTER_S = 20.0, 20.0
+BASELINE_FROM_S = 60.0
 
 
 def _requests_timeout(seconds: float) -> None:
@@ -91,8 +101,9 @@ def pick_lead(names: list[str]) -> int | None:
     return None
 
 
-def read_event(record: str, event: str) -> tuple[np.ndarray, int, str]:
-    """One ECG lead, BEFORE_S + AFTER_S around the alarm, at the source rate."""
+def read_event(record: str, event: str, start_s: float | None = None
+               ) -> tuple[np.ndarray, int, str]:
+    """One ECG lead, 40 s around the alarm (or from start_s), at the source rate."""
     import wfdb
 
     pn = f"{PN_DIR}/{record}"
@@ -101,7 +112,8 @@ def read_event(record: str, event: str) -> tuple[np.ndarray, int, str]:
     if ch is None:
         raise ValueError("no ECG lead")
     fs = int(round(hdr.fs))
-    lo, hi = int((ALARM_S - BEFORE_S) * fs), int((ALARM_S + AFTER_S) * fs)
+    a0 = ALARM_S - BEFORE_S if start_s is None else start_s
+    lo, hi = int(a0 * fs), int((a0 + BEFORE_S + AFTER_S) * fs)
     rec = wfdb.rdrecord(event, pn_dir=pn, sampfrom=lo, sampto=hi, channels=[ch])
     return rec.p_signal[:, 0].astype(np.float64), fs, hdr.sig_name[ch]
 
@@ -150,11 +162,13 @@ def main(argv=None) -> int:
     ap.add_argument("--limit", type=int, default=None, help="first N true alarms")
     ap.add_argument("--false", type=int, default=0, dest="n_false",
                     help="add N false alarms, from the same patients first")
+    ap.add_argument("--baseline", action="store_true",
+                    help="read each patient's rhythm from 60 s in, not the alarms")
     a = ap.parse_args(argv)
 
     socket.setdefaulttimeout(60)       # a stalled connection fails instead of hanging
     _requests_timeout(60)              # wfdb reads through requests, which ignores it
-    parts = a.cache / "vtac_parts"
+    parts = a.cache / ("vtac_parts_baseline" if a.baseline else "vtac_parts")
     parts.mkdir(parents=True, exist_ok=True)
     labels = fetch_csv("event_labels.csv")
     splits = split_map(fetch_csv("benchmark_data_split.csv"))
@@ -170,13 +184,21 @@ def main(argv=None) -> int:
             mine = {r["record"] for r in rows}
             ranked = sorted(false_rows, key=lambda r: r["record"] not in mine)
             rows = rows + ranked[:a.n_false]
+    if a.baseline:
+        seen, first = set(), []
+        for r in rows:
+            if r["record"] not in seen:
+                seen.add(r["record"])
+                first.append(r)
+        rows = first
     todo = [r for r in rows if not (parts / f"{r['record']}_{r['event']}.npz").exists()]
     n_f = sum(1 for r in rows if label(r) is False)
     print(f"events      {len(rows):,} ({len(rows) - n_f:,} true, {n_f:,} false), "
           f"{len(rows) - len(todo):,} already read")
 
     def work(r):
-        x, fs, lead = read_event(r["record"], r["event"])
+        x, fs, lead = read_event(r["record"], r["event"],
+                                 BASELINE_FROM_S if a.baseline else None)
         x = clean(x)
         if x is None:
             return r, "missing"
@@ -219,7 +241,7 @@ def main(argv=None) -> int:
         dec.append(bool(label(r)))
         spl.append(splits.get(r["event"], splits.get(r["record"], "")))
         leads.append(str(d["lead"]))
-    out = a.cache / "vtac_windows.npz"
+    out = a.cache / ("vtac_baseline.npz" if a.baseline else "vtac_windows.npz")
     np.savez_compressed(out, X=np.stack(X) if X else np.zeros((0, n), np.float32),
                         record=np.array(rec), event=np.array(ev), decision=np.array(dec),
                         split=np.array(spl), lead=np.array(leads))
