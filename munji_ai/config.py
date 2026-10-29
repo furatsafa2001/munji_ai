@@ -217,6 +217,18 @@ MAX_WINDOWS_PER_STAGE = {"quality": 120_000, "beat": 150_000,
 # Share of retained windows allowed to contain no ectopic beat / no episode.
 NEGATIVE_KEEP_RATE = {"beat": 0.15, "rhythm": 0.35, "shockable": 0.5}
 
+# For the beat stage the per-patient cap applies to NORMAL windows only.
+# Windows carrying at least one PAC or PVC are all kept, because they are the
+# scarce thing: each ectopic class is under 1% of mask samples, and the
+# previous code shuffled ectopic and normal windows together before
+# truncating, so it discarded ectopic windows at random.
+#
+# The reference paper keeps every segment containing an ectopic beat and
+# samples 1% of the purely normal ones. This is the same idea with a ceiling,
+# so one patient with very frequent ectopy cannot fill the cache alone.
+BEAT_KEEP_ALL_ECTOPIC = True
+BEAT_MAX_ECTOPIC_PER_PATIENT = 600
+
 CACHE_DTYPE = "float16"
 
 # --------------------------------------------------------------- augmentation

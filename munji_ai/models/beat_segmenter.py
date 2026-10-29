@@ -152,7 +152,7 @@ class BeatSegmenter(nn.Module):
         # carries no information a 4-sample window does not, and the saving
         # applies to every layer after it.
         self.stem = nn.Sequential(
-            nn.Conv1d(1, widths[0], 4, stride=4),
+            nn.Conv1d(2, widths[0], 4, stride=4),
             LayerNorm1d(widths[0]),
         )
 
@@ -179,9 +179,26 @@ class BeatSegmenter(nn.Module):
             nn.Conv1d(widths[0], n_classes, 1),
         )
 
+    @staticmethod
+    def with_derivative(x: torch.Tensor) -> torch.Tensor:
+        """(N, 1, L) -> (N, 2, L): the signal and its first difference.
+
+        Rate of change is what separates a narrow complex from a wide one, and
+        a wide complex is what makes a PVC a PVC. The model can derive this
+        itself, but handing it over costs one channel and removes the need to.
+
+        The difference is scaled to roughly the signal's own range so neither
+        channel dominates the first convolution by magnitude alone.
+        """
+        d = torch.diff(x, dim=-1, prepend=x[..., :1])
+        scale = d.abs().amax(dim=-1, keepdim=True).clamp_min(1e-6)
+        return torch.cat([x, d / scale], dim=1)
+
     def forward(self, x):
         if x.dim() == 2:
             x = x.unsqueeze(1)
+        if x.shape[1] == 1:
+            x = self.with_derivative(x)
         length = x.shape[-1]
 
         h = self.stem(x)
@@ -247,13 +264,21 @@ class SegmentationLoss(nn.Module):
         return ce + self.dice_weight * dice
 
 
-def class_weights_from_masks(masks, cap: float = 20.0) -> torch.Tensor:
+def class_weights_from_masks(masks, cap: float = 8.0) -> torch.Tensor:
     """Inverse-frequency weights, capped.
 
-    Ectopics occupy roughly 1.7% of samples each against 87% background, so raw
-    inverse frequency gives them weights above 50 and training becomes unstable.
-    The cap keeps the correction useful without letting a handful of samples
-    dominate every gradient step.
+    Ectopics occupy under 1% of samples each against 88% background, so raw
+    inverse frequency gives them weights above 30 and training becomes
+    unstable. The cap keeps the correction useful without letting a handful of
+    samples dominate every gradient step.
+
+    Lowered from 20.0, where both ectopic classes sat at the ceiling. That
+    pushed the model to call an ectopic on thin evidence: sensitivity held up
+    while precision did not, and the fragmentation diagnostic found 56% of the
+    excess predictions were spurious regions rather than split beats.
+
+    The same correction was needed on the quality gate, where a false-reject
+    penalty of 3.0 stopped it rejecting anything at all.
     """
     import numpy as np
 
