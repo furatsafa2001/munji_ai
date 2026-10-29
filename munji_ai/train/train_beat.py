@@ -151,11 +151,21 @@ def sample_macro_f1(true_masks: np.ndarray, pred_masks: np.ndarray) -> float:
 
 
 @torch.no_grad()
-def predict(model, loader, device) -> np.ndarray:
+def predict(model, loader, device, clean: bool = True) -> np.ndarray:
+    """Predicted masks for a loader, cleaned the way deployment will clean them.
+
+    Cleaning here rather than only in the final report matters: epoch selection
+    compares validation scores, and scoring raw output while shipping cleaned
+    output would let training pick a checkpoint that is not the best one in
+    practice.
+    """
+    from ..models.beat_segmenter import clean_mask
+
     model.eval()
     out = []
     for xb, _ in loader:
-        out.append(model(xb.to(device)).argmax(dim=1).cpu().numpy())
+        m = model(xb.to(device)).argmax(dim=1).cpu().numpy()
+        out.append(clean_mask(m) if clean else m)
     return np.concatenate(out)
 
 

@@ -81,6 +81,39 @@ BEAT_CLASSES = ("background", "N", "PAC", "PVC")
 BEAT_CLASS_ID = {c: i for i, c in enumerate(BEAT_CLASSES)}
 QRS_HALFWIDTH_MS = {"N": 50.0, "PAC": 50.0, "PVC": 70.0}
 
+# Predicted mask regions narrower than this are dropped before beats are read
+# off the mask. A real QRS spans about 100 ms; anything much narrower is a
+# patch of uncertainty, not a complex.
+#
+# Measured on the full validation split: 60 ms lifts beat F1 from 0.793 to
+# 0.846 and PVC precision from 0.798 to 0.934, costing 0.005 of QRS
+# sensitivity. 80 ms gives the same F1 while losing twice as much sensitivity.
+BEAT_MIN_REGION_MS = 60.0
+
+# ------------------------------------------------------------------ PVC burden
+# Share of beats in a period that are ventricular. The thresholds come from
+# published consensus, not from this project:
+#
+#   2017 AHA/ACC/HRS expert consensus   >= 15% of daily heartbeats
+#   2014 EHRA/HRS/APHRS expert consensus >= 10,000 PVCs per 24 h
+#   Reviewed series                      no cardiomyopathy below 10%
+#
+# A commercial insertable monitor using the 10% threshold reported 84%
+# patient-level sensitivity at 100% PPV against 24-hour Holter.
+PVC_BURDEN = {"info": 0.05, "warning": 0.10, "critical": 0.15}
+
+# The window burden is measured over. Burden is defined clinically over 24
+# hours, and a short window means something different: 20 seconds of bigeminy
+# is 50% burden and is not a finding. One hour is the shortest period that is
+# not dominated by a single run; the daily figure is the one that matches the
+# literature and the one a clinician will ask for.
+PVC_BURDEN_WINDOW_SEC = 3600.0
+PVC_BURDEN_DAILY_SEC = 86400.0
+
+# Below this many beats the percentage is noise. Ten PVCs out of thirty beats
+# is 33% and tells you nothing.
+PVC_BURDEN_MIN_BEATS = 200
+
 # --------------------------------------------------------------- window labels
 # Fraction of a window that must fall inside a rhythm episode for the window to
 # carry that label. Below this the window is ambiguous and is dropped rather
@@ -132,6 +165,34 @@ QUALITY_CLASSES = ("usable", "unusable")
 #   beat classifier needs clean morphology       -> strict
 #   rule engine needs only R-peak timing         -> permissive
 GATE_MIN_P = {"morphology": 0.90, "rhythm": 0.60}
+
+# How several gate decisions over one longer window combine into one.
+#
+# The gate judges 5 s windows; beat windows are 20 s and rhythm windows 30 s,
+# so each carries four or six gate decisions that can disagree.
+#
+#   "mean"  average P(usable) across the sub-windows
+#   "min"   the worst sub-window decides
+#
+# Measured on 3,906 beat validation windows with the trained gate:
+#
+#   mean @ 0.90   keeps 97.6%   passed F1 0.846   rejected F1 0.820
+#   min  @ 0.90   keeps 87.5%   passed F1 0.843   rejected F1 0.859
+#
+# The rejected column settles it. Under "mean" the dropped windows are worse
+# than the kept ones, which is what a gate is for. Under "min" they are
+# better, so it discards windows the classifier was handling, and costs 12.5%
+# of coverage to do it.
+#
+# "min" fails structurally, not by tuning: one bad second disqualifies
+# nineteen good ones, and the segmenter labels each sample independently.
+GATE_COMBINER = "mean"
+
+# Caveat on the above. P(usable) over the beat cache has a median of 0.922 and
+# a 10th-to-90th range of 0.906 to 0.938 — a very narrow spread, because
+# Icentia and SVDB are comparatively clean. The measurement shows the gate
+# costs nothing on clean data; it does not show the gate is unnecessary. A
+# moving patient will produce a far wider spread.
 
 # ---------------------------------------------------------------- cache limits
 # Icentia has ~11k patients of multi-day recording — orders of magnitude more

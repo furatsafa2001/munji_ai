@@ -199,9 +199,17 @@ class BeatSegmenter(nn.Module):
         return self.head(h)
 
     @torch.no_grad()
-    def predict_mask(self, x) -> torch.Tensor:
+    def predict_mask(self, x, clean: bool = True) -> torch.Tensor:
+        """Per-sample class mask, narrow regions removed by default.
+
+        `clean=False` returns the raw argmax, which is what the width rule was
+        measured against; keep it for diagnostics, not for deployment.
+        """
         self.eval()
-        return self(x).argmax(dim=1)
+        mask = self(x).argmax(dim=1)
+        if not clean:
+            return mask
+        return torch.from_numpy(clean_mask(mask.cpu().numpy())).to(mask.device)
 
     def n_params(self) -> int:
         return sum(p.numel() for p in self.parameters() if p.requires_grad)
@@ -256,6 +264,48 @@ def class_weights_from_masks(masks, cap: float = 20.0) -> torch.Tensor:
         n = max(int((m == i).sum()), 1)
         w.append(min(total / (len(BEAT_CLASSES) * n), cap))
     return torch.tensor(w, dtype=torch.float32)
+
+
+def clean_mask(mask, min_width_ms: float | None = None, fs: int | None = None):
+    """Drop predicted regions too narrow to be a QRS complex.
+
+    Works on a single mask (L,) or a batch (N, L); returns the same shape.
+
+    Only width is filtered. Merging adjacent same-class regions was measured
+    and rejected: neighbouring regions sit a median of 664 ms apart, which is
+    the gap between two beats rather than a split within one, and merging at
+    that distance would fuse genuine consecutive beats.
+    """
+    import numpy as np
+
+    from ..config import BEAT_MIN_REGION_MS, TARGET_FS
+
+    if min_width_ms is None:
+        min_width_ms = BEAT_MIN_REGION_MS
+    if fs is None:
+        fs = TARGET_FS
+    min_w = int(round(min_width_ms * fs / 1000.0))
+    if min_w <= 1:
+        return mask
+
+    arr = np.asarray(mask)
+    single = arr.ndim == 1
+    out = (arr[None, :] if single else arr).copy()
+
+    for row in out:
+        i, n = 0, len(row)
+        while i < n:
+            c = int(row[i])
+            if c == 0:
+                i += 1
+                continue
+            j = i
+            while j < n and int(row[j]) == c:
+                j += 1
+            if (j - i) < min_w:
+                row[i:j] = 0
+            i = j
+    return out[0] if single else out
 
 
 def build(**kw) -> BeatSegmenter:
