@@ -28,8 +28,16 @@ The embeddings come from the final ShockableNet, which saw these patients'
 windows during training, but only ever with shockable / not labels, never VF
 or VT; the VF/VT classifier on top is still cross-validated by patient.
 
-Verdict: a pooled out-of-fold AUC of 0.85 or more makes a second stage worth
-building. Below that, more VT data comes first (PhysioNet VTaC).
+With --vtac (data/cache/vtac_windows.npz from munji_ai.data.vtac), confirmed
+VT from ICU monitors joins the training side in every fold. The score that
+counts is still on held-out CUDB and VFDB patients only, where VF and VT come
+from the same recordings: a classifier that had merely learnt "ICU monitor"
+against "Holter" would score badly there, because those VT windows are not
+from an ICU monitor. VTaC's own test split is scored separately, as the share
+of its confirmed VT the classifier calls VT.
+
+Verdict: a pooled out-of-fold AUC of 0.85 or more on CUDB and VFDB makes a
+second stage worth building.
 
 Reads only. Writes nothing.
 """
@@ -130,26 +138,56 @@ def embeddings(model, X: np.ndarray) -> np.ndarray:
     return np.concatenate(out)
 
 
-def cv_scores(F: np.ndarray, y: np.ndarray, groups: np.ndarray, kind: str) -> np.ndarray:
+def vtac_windows(path: Path):
+    """Confirmed-VT windows from VTaC: 5 s ending at, around and after the alarm.
+
+    The bedside monitor alarms once it has seen VT, so the run is in progress
+    at the alarm; three overlapping windows from 15 to 25 s of the 40 s slice
+    (alarm at 20 s) keep close to it without leaning on any model to choose.
+    """
+    d = np.load(path)
+    keep = d["decision"].astype(bool)
+    win = C.window_samples("shockable")
+    starts = [int(s * FS) for s in (15.0, 17.5, 20.0)]
+    raw, groups, split = [], [], []
+    for x, rec, sp in zip(d["X"][keep], d["record"][keep], d["split"][keep]):
+        for s0 in starts:
+            raw.append(np.asarray(x[s0:s0 + win], dtype=np.float64))
+            groups.append(f"vtac:{rec}")
+            split.append(str(sp))
+    return raw, np.array(groups), np.array(split)
+
+
+def make_clf(kind: str):
     from sklearn.ensemble import RandomForestClassifier
     from sklearn.impute import SimpleImputer
     from sklearn.linear_model import LogisticRegression
-    from sklearn.model_selection import GroupKFold
     from sklearn.pipeline import make_pipeline
     from sklearn.preprocessing import StandardScaler
+
+    if kind == "forest":
+        return make_pipeline(SimpleImputer(), RandomForestClassifier(
+            300, min_samples_leaf=5, class_weight="balanced", random_state=0, n_jobs=-1))
+    return make_pipeline(SimpleImputer(), StandardScaler(), LogisticRegression(
+        C=0.1, class_weight="balanced", max_iter=5000))
+
+
+def cv_scores(F: np.ndarray, y: np.ndarray, groups: np.ndarray, kind: str,
+              F_extra: np.ndarray | None = None) -> np.ndarray:
+    """Out-of-fold P(VT) by patient; F_extra (all VT) joins every training fold."""
+    from sklearn.model_selection import GroupKFold
 
     n_splits = min(5, len(np.unique(groups)))
     p = np.full(len(y), np.nan)
     for tr, te in GroupKFold(n_splits).split(F, y, groups):
-        if len(np.unique(y[tr])) < 2:
+        Ftr, ytr = F[tr], y[tr]
+        if F_extra is not None and len(F_extra):
+            Ftr = np.vstack([Ftr, F_extra])
+            ytr = np.concatenate([ytr, np.ones(len(F_extra), dtype=int)])
+        if len(np.unique(ytr)) < 2:
             continue
-        if kind == "forest":
-            clf = make_pipeline(SimpleImputer(), RandomForestClassifier(
-                300, min_samples_leaf=5, class_weight="balanced", random_state=0, n_jobs=-1))
-        else:
-            clf = make_pipeline(SimpleImputer(), StandardScaler(), LogisticRegression(
-                C=0.1, class_weight="balanced", max_iter=5000))
-        clf.fit(F[tr], y[tr])
+        clf = make_clf(kind)
+        clf.fit(Ftr, ytr)
         p[te] = clf.predict_proba(F[te])[:, 1]
     return p
 
@@ -180,6 +218,8 @@ def main(argv=None) -> int:
     ap.add_argument("--datasets", nargs="+", default=["cudb", "vfdb"])
     ap.add_argument("--cache", type=Path, default=CACHE_DIR)
     ap.add_argument("--raw", type=Path, default=RAW_DIR)
+    ap.add_argument("--vtac", type=Path, default=None,
+                    help="data/cache/vtac_windows.npz: add confirmed VT from ICU monitors")
     a = ap.parse_args(argv)
 
     ck = torch.load(a.checkpoint, map_location="cpu", weights_only=False)
@@ -215,28 +255,55 @@ def main(argv=None) -> int:
     print("computing features ...", flush=True)
     Ff = np.stack([features(x) for x in raw])
     Fe = embeddings(model, np.stack(norm))
-    candidates = {
-        "features, forest": cv_scores(Ff, y, groups, "forest"),
-        "features, logistic": cv_scores(Ff, y, groups, "logistic"),
-        "embeddings, logistic": cv_scores(Fe, y, groups, "logistic"),
-        "both, logistic": cv_scores(np.hstack([Ff, Fe]), y, groups, "logistic"),
-    }
+    both = np.hstack([Ff, Fe])
 
-    print(f"\nby patient, out of fold (VT is the positive class)")
-    print(f"  {'candidate':<24}{'AUC':>7}{'VT recall':>11}{'VF recall':>11}")
+    extra = {}
+    if a.vtac is not None:
+        v_raw, v_groups, v_split = vtac_windows(a.vtac)
+        dev = np.isin(v_split, ["train", "val"])
+        print(f"VTaC        {int(dev.sum()):,} VT windows for training from "
+              f"{len(set(v_groups[dev])):,} patients, {int((~dev).sum()):,} held out (its test split)")
+        vf_ = np.stack([features(x) for x in v_raw])
+        ve_ = embeddings(model, np.stack([normalize(x) for x in v_raw]))
+        extra = {"features": (vf_[dev], vf_[~dev]), "embeddings": (ve_[dev], ve_[~dev]),
+                 "both": (np.hstack([vf_, ve_])[dev], np.hstack([vf_, ve_])[~dev])}
+
+    sets = {"features": Ff, "embeddings": Fe, "both": both}
+    plan = [("features", "forest"), ("features", "logistic"),
+            ("embeddings", "logistic"), ("both", "logistic")]
+    candidates = {}
+    for fs_name, kind in plan:
+        candidates[f"{fs_name}, {kind}"] = cv_scores(sets[fs_name], y, groups, kind)
+        if extra:
+            candidates[f"{fs_name}, {kind} + VTaC"] = cv_scores(
+                sets[fs_name], y, groups, kind, F_extra=extra[fs_name][0])
+
+    print(f"\nheld-out CUDB and VFDB patients, out of fold (VT is the positive class)")
+    print(f"  {'candidate':<34}{'AUC':>7}{'VT recall':>11}{'VF recall':>11}")
     best = None
     for name, p in candidates.items():
         a_ = auc(y, p)
         r_vt, r_vf = recalls(y, p)
-        print(f"  {name:<24}{a_:>7.3f}{r_vt:>11.0%}{r_vf:>11.0%}")
+        print(f"  {name:<34}{a_:>7.3f}{r_vt:>11.0%}{r_vf:>11.0%}")
         if best is None or a_ > best[1]:
             best = (name, a_)
+
+    if extra:
+        print(f"\nVTaC test split: share of its confirmed VT called VT")
+        for fs_name, kind in plan:
+            clf = make_clf(kind)
+            Xtr = np.vstack([sets[fs_name], extra[fs_name][0]])
+            ytr = np.concatenate([y, np.ones(len(extra[fs_name][0]), dtype=int)])
+            clf.fit(Xtr, ytr)
+            if len(extra[fs_name][1]):
+                r = float((clf.predict_proba(extra[fs_name][1])[:, 1] >= 0.5).mean())
+                print(f"  {fs_name + ', ' + kind:<34}{r:>7.0%}")
 
     print(f"\nsingle features (AUC, VT above VF)")
     for j, nm in enumerate(FEATURE_NAMES):
         print(f"  {nm:<18}{auc(y, Ff[:, j]):.3f}")
 
-    print(f"\nbest: {best[0]}, AUC {best[1]:.3f}")
+    print(f"\nbest on CUDB and VFDB: {best[0]}, AUC {best[1]:.3f}")
     print("worth building a second stage" if best[1] >= 0.85 else
           "not yet: more VT data first (PhysioNet VTaC), then test again")
     return 0

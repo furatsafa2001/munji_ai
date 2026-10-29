@@ -85,11 +85,40 @@ def main() -> int:
             rc = ff.main(["--checkpoint", str(models / "final.pt"), "--models", str(models),
                           "--cache", str(cache), "--raw", str(raw), "--datasets", "vfdb"])
         text = buf.getvalue()
-        check("runs end to end", rc == 0 and "by patient, out of fold" in text)
+        check("runs end to end", rc == 0 and "patients, out of fold" in text)
         line = [l for l in text.splitlines() if l.strip().startswith("features, forest")]
         a = float(line[0].split()[2]) if line else 0.0
         check("separable synthetic VF and VT score a high AUC", a > 0.9, f"AUC {a:.3f}")
         check("both classes counted", "recordings  with VF 4   with VT 4" in text)
+
+        print("\nWith VTaC on the training side\n")
+        n, fs_ = 10000, 250
+        Xv, recs, splits = [], [], []
+        for j in range(6):
+            x = rng.normal(0, 0.01, n)
+            t = 0.3
+            while t < 40 - 0.3:
+                c, w = int(t * fs_), int(0.03 * fs_)
+                x[c - 4 * w:c + 4 * w] += np.exp(-0.5 * ((np.arange(-4 * w, 4 * w)) / w) ** 2)
+                t += 60 / (150 + 10 * j)
+            Xv.append(x.astype(np.float32))
+            recs.append(f"v{j}")
+            splits.append("train" if j < 4 else "test")
+        np.savez(cache / "vtac_windows.npz", X=np.stack(Xv), record=np.array(recs),
+                 event=np.array(recs), decision=np.ones(6, bool), split=np.array(splits),
+                 lead=np.array(["V"] * 6))
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = ff.main(["--checkpoint", str(models / "final.pt"), "--models", str(models),
+                          "--cache", str(cache), "--raw", str(raw), "--datasets", "vfdb",
+                          "--vtac", str(cache / "vtac_windows.npz")])
+        text = buf.getvalue()
+        check("runs with --vtac", rc == 0, text.splitlines()[-1] if text else "")
+        check("VTaC windows counted, test split held out",
+              "12 VT windows for training from 4 patients, 6 held out" in text,
+              [l for l in text.splitlines() if l.startswith("VTaC")])
+        check("each candidate also scored with VTaC added", "+ VTaC" in text)
+        check("VTaC test split scored separately", "VTaC test split" in text)
 
     print("\n" + ("ALL CHECKS PASSED" if ok else "FAILURES ABOVE"))
     return 0 if ok else 1
