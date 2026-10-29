@@ -35,3 +35,7 @@ desktop.ini
 .idea/
 
 munji_current.zip
+
+*.zip
+figures/
+reports/
