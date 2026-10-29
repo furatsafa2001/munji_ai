@@ -46,6 +46,8 @@ def config_hash() -> str:
         "windows": C.WINDOW_SEC,
         "strides": C.WINDOW_STRIDE_SEC,
         "qrs": C.QRS_HALFWIDTH_MS,
+        "keep_all_ectopic": getattr(C, "BEAT_KEEP_ALL_ECTOPIC", False),
+        "max_ectopic": getattr(C, "BEAT_MAX_ECTOPIC_PER_PATIENT", 0),
         "beat_classes": C.BEAT_CLASSES,
         "purity": [C.RHYTHM_PURITY, C.SHOCKABLE_PURITY],
         "shockable_rhythms": sorted(C.SHOCKABLE_RHYTHMS),
@@ -157,9 +159,20 @@ def extract_beat(rec: Record, rng, cap: int):
     rng.shuffle(neg)
     n_neg = min(len(neg), int(len(pos) * C.NEGATIVE_KEEP_RATE["beat"] /
                              max(1 - C.NEGATIVE_KEEP_RATE["beat"], 1e-6)))
-    chosen = pos + neg[:n_neg] if pos else neg[: max(1, cap // 4)]
-    rng.shuffle(chosen)
-    chosen = chosen[:cap]
+
+    if getattr(C, "BEAT_KEEP_ALL_ECTOPIC", False):
+        # Truncate the normal windows, never the ectopic ones. Shuffling the
+        # two together and cutting to `cap` threw away the scarce class at
+        # random, which is the opposite of what the reference method does.
+        rng.shuffle(pos)
+        pos = pos[: C.BEAT_MAX_ECTOPIC_PER_PATIENT]
+        room = max(cap - len(pos), max(1, cap // 4))
+        chosen = pos + neg[: min(n_neg, room)] if pos else neg[: max(1, cap // 4)]
+        rng.shuffle(chosen)
+    else:
+        chosen = pos + neg[:n_neg] if pos else neg[: max(1, cap // 4)]
+        rng.shuffle(chosen)
+        chosen = chosen[:cap]
 
     X, Y, M = [], [], []
     for lo, hi, rel, wcls in chosen:
