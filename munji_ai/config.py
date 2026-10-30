@@ -264,8 +264,8 @@ AUGMENT_PROB = 0.5
 #   warning  110  NEWS2: 111-130 scores 2 (91-110 scores 1)
 #   critical 150  AHA adult tachyarrhythmia algorithm: rate typically >= 150
 #
-# The client's abnormality list shows "< 30" and "> 180" in its Example column
-# for the extreme tiers. They are illustrations there, not thresholds.
+# These tiers grade findings for the doctor's report. Who is NOTIFIED is a
+# separate decision, below under "notification".
 HR_BRADY = {"info": 60, "warning": 50, "critical": 40}     # strictly below
 HR_TACHY = {"info": 100, "warning": 110, "critical": 150}  # see semantics above
 
@@ -320,12 +320,42 @@ QRS_SEARCH_HALF_MS = 100
 # +/-10 ms, SD 10 ms against expert measurement). None until then: no band.
 QRS_UNCERTAIN_MS = None
 
+# ------------------------------------------------------------------ notification
+# Which findings reach the caregiver. Everything else goes to the report.
+#
+# Source: ambulatory cardiac telemetry practice (MCOT), the same class of
+# device as this patch, rather than ICU alarm limits. Physician-notification
+# criteria of a commercial MCOT service (Philips BioTel MCOT protocol, as
+# published in J Cardiol Curr Res, "Outpatient cardiac telemetry monitoring
+# for early patient discharge"): pause of
+# 3 s or more; SVT or AF at 180 bpm or more for 30 s or more; bradycardia at
+# 30 bpm or less for 30 s or more; wide-complex tachycardia at 150 bpm or more
+# for 6 s or more. In a retrospective series of 26,438 MCOT patients (cited in
+# payer medical-policy reviews of MCOT) the potentially emergent events were
+# wide-complex tachycardia, pauses of 6 s or longer, and sustained bradycardia
+# below 30 bpm. The client's abnormality list gives the same 30 and 180 as its
+# examples for the extreme tiers.
+#
+#   sustained bradycardia  rate at or below 30, held 30 s    emergent
+#   sustained tachycardia  rate at or above 180, held 30 s   urgent
+#   pause                  gap longer than PAUSE_WARNING_SEC    urgent
+#   asystole               gap longer than ASYSTOLE_CRITICAL_SEC emergent
+#   wide-complex rhythm    150 bpm for 6 s: ventricular-beat detector, not here
+NOTIFY_SUSTAIN_SEC = 30.0
+NOTIFY_BRADY_BPM = 30           # at or below, held for NOTIFY_SUSTAIN_SEC
+NOTIFY_TACHY_BPM = 180          # at or above, held for NOTIFY_SUSTAIN_SEC
+
+# The "fast narrow" (SVT) label rests on the QRS width estimate, which failed
+# against hand-measured QRS on the QT Database: mean -50 ms, SD 35 ms against
+# IEC 60601-2-25 limits of +/-10 ms and 10 ms, correlation 0.25. Off until a
+# width source passes. A fast rhythm is still reported and notified by rate.
+FAST_NARROW_LABEL = False
+
 # Windows the rate engine runs on, derived from the definitions above, not
-# chosen. 20 s holds a 5-beat run down to 15 bpm (slower is a pause). With a
-# 2.5 s stride a gap longer than 6 s always falls whole inside one window
-# (20 - 2.5 > 6). Latency is the run itself plus at most one stride; EC13 asks
-# monitors to alarm within 10 s of onset.
-RULES_WINDOW_SEC = 20.0
+# chosen. 40 s holds a 30 s sustained run whole (40 - 2.5 > 30), and so also a
+# gap longer than 6 s and a 5-beat run at any rate a heart can hold. Latency is
+# the definition itself (30 s, or the gap) plus at most one stride.
+RULES_WINDOW_SEC = 40.0
 RULES_STRIDE_SEC = 2.5
 
 # Confirmation windows — N of M consecutive positives before an alert fires.

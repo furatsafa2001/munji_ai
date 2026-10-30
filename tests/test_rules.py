@@ -132,6 +132,27 @@ def main():
     check("an 8-beat burst at 160 is not a 17-beat run", fast <= 100, f"{fast:.1f}")
     check("fewer intervals than the run -> no rate", np.isnan(R.held_rates(np.full(4, 2.0), 5)[0]))
 
+    print("\n4b. notification thresholds (pure; MCOT practice)")
+    got = ks(R.classify_sustained(30.0, nan))
+    check("held 30.0 for 30 s -> sustained bradycardia", got == {("sustained_bradycardia", "critical")})
+    check("held 30.1 for 30 s -> nothing", R.classify_sustained(30.1, nan) == [])
+    got = ks(R.classify_sustained(nan, 180.0))
+    check("held 180.0 for 30 s -> sustained tachycardia", got == {("sustained_tachycardia", "critical")})
+    check("held 179.9 for 30 s -> nothing", R.classify_sustained(nan, 179.9) == [])
+    want = {"sustained_bradycardia": "emergent", "sustained_tachycardia": "urgent",
+            "pause": "urgent", "asystole": "emergent", "bradycardia": "",
+            "extreme_bradycardia": "", "tachycardia": "", "extreme_tachycardia": "",
+            "fast_narrow": ""}
+    check("only the four MCOT events are sent; every tier stays report-only",
+          all(R.Finding(k, "warning").notify == v for k, v in want.items()))
+    rr = np.full(30, 60 / 28)                     # 28 bpm for about 64 s
+    slow, _ = R.held_rates_for(rr, 30.0)
+    check("28 bpm held for 30 s is found", abs(slow - 28) < 0.5, f"{slow:.1f}")
+    rr = np.array([0.8] * 20 + [60 / 28] * 11 + [0.8] * 20)   # about 23 s at 28 bpm
+    slow, _ = R.held_rates_for(rr, 30.0)
+    check("23 s at 28 bpm is not 30 s held", slow > C.NOTIFY_BRADY_BPM, f"{slow:.1f}")
+    check("a window shorter than the run -> no rate", np.isnan(R.held_rates_for(np.full(5, 1.0), 30.0)[0]))
+
     # ------------------------------------------------------------------
     print("\n5. on signal: runs")
     for bpm, kind, sev in [(35, "extreme_bradycardia", "critical"),
@@ -145,6 +166,15 @@ def main():
               f"{r.findings}, median {r.bpm:.1f}")
     r = R.analyse(ecg(bpm=72, p_mv=0.12))
     check("72 bpm with P and T waves -> nothing", r.findings == [], str(r.findings))
+    r = R.analyse(ecg(bpm=28))
+    check("28 bpm across the window -> sustained bradycardia, sent",
+          [f.kind for f in r.findings if f.notify] == ["sustained_bradycardia"], str(r.findings))
+    r = R.analyse(ecg(bpm=190))
+    check("190 bpm across the window -> sustained tachycardia, sent",
+          [f.kind for f in r.findings if f.notify] == ["sustained_tachycardia"], str(r.findings))
+    r = R.analyse(ecg(bpm=35))
+    check("35 bpm -> graded critical for the report, nothing sent",
+          "extreme_bradycardia" in r.kinds() and not any(f.notify for f in r.findings))
     burst = regular(0.4, 0.8, 10.0) + regular(10.2, 0.375, 10.2 + 0.375 * 10)
     burst += regular(burst[-1] + 0.8, 0.8, WIN - 0.4)
     r = R.analyse(ecg(times=burst))
@@ -182,10 +212,11 @@ def main():
     check("width grows with true width", w[0] < w[1] < w[2], f"{w[0]:.0f} < {w[1]:.0f} < {w[2]:.0f}")
     check("no longer capped at 124 ms", w[2] > 124, f"{w[2]:.0f} ms")
     r = R.analyse(ecg(bpm=160, qrs_ms=70))
-    check("160 bpm narrow -> extreme tachy + fast_narrow",
-          {"extreme_tachycardia", "fast_narrow"} <= r.kinds(), str(r.findings))
+    check("SVT label is off (width failed on QT Database): 160 narrow -> extreme tachy only",
+          r.kinds() == {"extreme_tachycardia"} and not C.FAST_NARROW_LABEL, str(r.findings))
+    check("... width is still measured and reported", r.qrs_class == "narrow", r.qrs_class)
     r = R.analyse(ecg(bpm=160, qrs_ms=240))
-    check("160 bpm wide -> extreme tachy only, labelled wide, no fast_narrow",
+    check("160 bpm wide -> extreme tachy only, labelled wide",
           r.kinds() == {"extreme_tachycardia"} and r.qrs_class == "wide",
           f"{r.findings}, {r.qrs_class} {r.qrs_ms:.0f} ms")
     check("wide_complex is never reported", "wide_complex" not in R.KINDS)
@@ -195,13 +226,17 @@ def main():
           R.analyse(x).qrs_class == "narrow", f"{R.analyse(x).qrs_ms:.0f} ms")
 
     print("\n9. sliding reports")
-    sig = np.concatenate([ecg(bpm=70, seconds=30), ecg(bpm=35, seconds=30, seed=3)])
+    sig = np.concatenate([ecg(bpm=70, seconds=60), ecg(bpm=28, seconds=60, seed=3)])
     reps = list(R.sliding_reports(sig))
-    check("one report every stride", len(reps) == int((60 - WIN) / C.RULES_STRIDE_SEC) + 1,
+    check("one report every stride", len(reps) == int((120 - WIN) / C.RULES_STRIDE_SEC) + 1,
           f"{len(reps)} reports")
     first = next((t for t, r in reps if "extreme_bradycardia" in r.kinds()), None)
-    check("extreme brady found within ~10 s of onset (EC13 latency)",
-          first is not None and first - 30.0 <= 12.0, f"first at {first} s, onset 30 s")
+    check("a slow rate is graded within ~12 s of onset", first is not None and first - 60.0 <= 12.0,
+          f"first at {first} s, onset 60 s")
+    first = next((t for t, r in reps if "sustained_bradycardia" in r.kinds()), None)
+    check("it is sent once held 30 s, within one stride and a beat of the definition",
+          first is not None and 30.0 <= first - 60.0 <= 30.0 + C.RULES_STRIDE_SEC + 60 / 28 + 1,
+          f"first at {first} s, onset 60 s")
 
     print("\n10. config consistency")
     check("brady tiers ordered", C.HR_BRADY["critical"] < C.HR_BRADY["warning"] < C.HR_BRADY["info"])
@@ -212,6 +247,10 @@ def main():
           C.RULES_WINDOW_SEC - C.RULES_STRIDE_SEC > C.ASYSTOLE_CRITICAL_SEC)
     check("the window holds a brady run down to 15 bpm",
           C.RULES_WINDOW_SEC >= C.RATE_RUN_BEATS["brady"] * 60.0 / 15)
+    check("a 30 s sustained run always fits whole in one window",
+          C.RULES_WINDOW_SEC - C.RULES_STRIDE_SEC > C.NOTIFY_SUSTAIN_SEC)
+    check("notification lines sit beyond the report tiers",
+          C.NOTIFY_BRADY_BPM < C.HR_BRADY["critical"] and C.NOTIFY_TACHY_BPM > C.HR_TACHY["critical"])
     fams = {fam for fam, _ in R.KINDS.values()}
     check("every finding family has a decision-layer rule", fams == set(RATE_FAMILIES),
           f"{sorted(fams)} vs {sorted(RATE_FAMILIES)}")

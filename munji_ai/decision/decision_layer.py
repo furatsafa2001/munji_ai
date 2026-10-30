@@ -53,30 +53,33 @@ AF (RhythmNet, every 15 s)
     windows count neither way. OTHER is never alerted.
 
 Rate rules (rate engine)
-    The engine already holds each rate finding over a run of beats (5 for
-    brady, 17 for tachy) or a gap length (3 s pause, 6 s asystole), with
-    every threshold sourced in config. So one window with a finding is
-    confirmed (config.CONFIRMATION, (1, 1)), and alarm latency stays near the
-    10 s EC13 expects.
+    Who is told follows ambulatory cardiac telemetry (MCOT) practice, the same
+    class of device as this patch, not ICU alarm limits. Only four rate
+    findings are ever sent (config, "notification"):
 
-    Findings are confirmed per family, not per name: bradycardia and extreme
-    bradycardia are one episode, as are pause and asystole. A rate wobbling
-    between 38 and 41 used to split into two half-confirmed findings and
-    alert neither. One alert per episode, and one more if it escalates to a
-    higher severity while it lasts.
+        sustained bradycardia   30 bpm or less held 30 s     emergent -> critical
+        sustained tachycardia   180 bpm or more held 30 s    urgent   -> warning
+        pause                   no beat for more than 3 s    urgent   -> warning
+        asystole                no beat for more than 6 s    emergent -> critical
 
-    Info-level findings (rate below 60, above 100) are counted for the report,
-    never alerted: asymptomatic sinus bradycardia is not associated with
-    adverse outcomes (2018 ACC/AHA/HRS).
+    Every other rate finding (below 60 / 50 / 40, above 100 / 110 / 150) is
+    graded and counted for the doctor's report, never sent. On a healthy
+    NSRDB day those tiers produced about 90 warnings: the rate really does
+    cross 50 asleep and 110 walking, which is why telemetry services do not
+    notify on them.
+
+    The engine holds each finding over its run (beats, 30 s, or the gap), so
+    one window is confirmed (config.CONFIRMATION, (1, 1)). Findings are
+    confirmed per family: pause then asystole is one episode, alerted once and
+    escalated once.
 
     Who judges a finding depends on its basis:
-      rate findings (brady, tachy, fast narrow) need a gate-accepted window,
-        because noise invents beats;
-      absence findings (pause, asystole) need the leads reported on. The
-        gate is not the judge here: a stopped heart can look like poor
-        signal, and ACLS asks for the leads to be checked before a flat line
-        is called asystole. With lead status unknown (lead_off=None, public
-        recordings), the gate decides instead.
+      rate findings need a gate-accepted window, because noise invents beats;
+      absence findings (pause, asystole) need the leads reported on. The gate
+      is not the judge here: a stopped heart can look like poor signal, and
+      ACLS asks for the leads to be checked before a flat line is called
+      asystole. With lead status unknown (lead_off=None, public recordings),
+      the gate decides instead.
     Nothing cardiac is counted while the leads are off or the window has
     missing samples (complete=False); those windows are counted for the
     technical notices.
@@ -85,12 +88,10 @@ Priority
     While a VF/VT episode is active, AF and rate warnings are held back: the
     person is already being told the most urgent thing.
 
-    Fast-narrow (SVT) findings are held whenever ShockableNet saw a shockable
-    window in the last 6. On 429 real fast-VT windows the rate engine's width
-    estimate called 22% of them narrow, and calling VT "SVT" could mislead
-    treatment, so ShockableNet's view wins. The engine no longer reports
-    wide-complex tachycardia at all (14% sensitivity on real VT); ventricular
-    rhythms come from the ventricular-beat detector.
+    The engine no longer names a fast rhythm narrow (SVT) or wide: its width
+    estimate failed on the QT Database. Ventricular rhythms come from the
+    ventricular-beat detector. If the SVT label returns, it stays held while
+    ShockableNet saw danger in the last 6 windows (ventricular_hold).
 
 Lead-off
     4 lead-off windows in the last 6 raise one "check the patch" notice per
@@ -105,6 +106,7 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from .. import config as C
+from ..rules.rate_engine import NOTIFY_LEVELS
 
 SEVERITY = ("info", "warning", "critical")
 
@@ -169,7 +171,7 @@ class DecisionLayer:
         self._lead = _Episode(c.lead_off_rule, c.shock_episode_end)
         self._rate: dict = {}
         self._rate_level: dict = {}
-        self.rate_info_windows: dict = {}
+        self.rate_report_windows: dict = {}
         self.no_data_windows = 0
         self.lead_off_windows = 0
         self._last_af_alert = -np.inf
@@ -228,7 +230,8 @@ class DecisionLayer:
             self.lead_off_windows += 1
         monitored = complete and lead_off is not True
 
-        worst: dict = {}
+        worst: dict = {}         # family -> most urgent finding that is sent
+        graded: dict = {}        # family -> most severe report-only finding
         if monitored:
             for f in getattr(rate, "findings", []):
                 if f.basis == "rate":
@@ -239,16 +242,24 @@ class DecisionLayer:
                     continue
                 if f.family in self.cfg.ventricular_hold and self.ventricular_activity():
                     continue
-                cur = worst.get(f.family)
-                if cur is None or SEVERITY.index(f.severity) > SEVERITY.index(cur.severity):
-                    worst[f.family] = f
+                if f.notify:
+                    cur = worst.get(f.family)
+                    if cur is None or (NOTIFY_LEVELS.index(f.notify)
+                                       > NOTIFY_LEVELS.index(cur.notify)):
+                        worst[f.family] = f
+                else:
+                    cur = graded.get(f.family)
+                    if cur is None or SEVERITY.index(f.severity) > SEVERITY.index(cur.severity):
+                        graded[f.family] = f
+
+        for family, f in graded.items():
+            by_sev = self.rate_report_windows.setdefault(family, {})
+            by_sev[f.severity] = by_sev.get(f.severity, 0) + 1
 
         out = []
         for family, key in RATE_FAMILIES.items():
             f = worst.get(family)
-            if f is not None and f.severity == "info":
-                self.rate_info_windows[family] = self.rate_info_windows.get(family, 0) + 1
-            alerting = f is not None and f.severity != "info"
+            alerting = f is not None
             ep = self._rate.get(family)
             if ep is None:
                 ep = self._rate[family] = _Episode(tuple(C.CONFIRMATION[key]),
@@ -259,14 +270,15 @@ class DecisionLayer:
                 continue
             level = self._rate_level.get(family)
             escalated = (alerting and level is not None
-                         and SEVERITY.index(f.severity) > SEVERITY.index(level))
+                         and NOTIFY_LEVELS.index(f.notify) > NOTIFY_LEVELS.index(level))
             if not (started or escalated):
                 continue
-            self._rate_level[family] = f.severity
-            if self._shock.active and f.severity != "critical":
+            self._rate_level[family] = f.notify
+            severity = NOTIFY_SEVERITY[f.notify]
+            if self._shock.active and severity != "critical":
                 continue
-            out.append(Alert(t, f.kind, f.severity, "rate", f.detail,
-                             {"value": float(f.value)}))
+            out.append(Alert(t, f.kind, severity, "rate", f.detail,
+                             {"value": float(f.value), "notify": f.notify}))
         return self._emit(out)
 
     def ventricular_activity(self) -> bool:
@@ -281,7 +293,7 @@ class DecisionLayer:
                 "af_burden": self.af_windows / n if n else 0.0,
                 "af_minutes": self.af_windows * C.WINDOW_STRIDE_SEC["rhythm"] / 60.0,
                 "other_windows": self.other_windows,
-                "rate_info_windows": dict(self.rate_info_windows),
+                "rate_report_windows": {k: dict(v) for k, v in self.rate_report_windows.items()},
                 "no_data_windows": self.no_data_windows,
                 "lead_off_windows": self.lead_off_windows,
                 "alerts": [(a.t, a.kind, a.severity) for a in self.alerts]}
@@ -290,6 +302,9 @@ class DecisionLayer:
         self.alerts.extend(out)
         return out
 
+
+# notification level -> alert severity
+NOTIFY_SEVERITY = {"urgent": "warning", "emergent": "critical"}
 
 # rate family -> its config.CONFIRMATION entry
 RATE_FAMILIES = {

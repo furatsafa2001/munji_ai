@@ -17,8 +17,8 @@ The second number is the one that drives caregiver trust.
 
 How
 ---
-The rate engine runs at its deployment window and stride (20 s every 2.5 s)
-over the 30 s before the alarm; the alarm counts as raised if any window
+The rate engine runs at its deployment window and stride (40 s every 2.5 s)
+over the seconds before the alarm; the alarm counts as raised if any window
 holds the matching finding. The Challenge places the event's onset within
 the 10 s before the alarm.
 
@@ -58,7 +58,7 @@ ALARMS = {
 LEAD_ORDER = ("V", "V5", "V4", "V6", "MCL", "II", "I", "III", "AVF", "AVL", "AVR")
 
 ALARM_SEC = 300.0      # alarm onset in every record
-LOOKBACK_SEC = 30.0    # onset lies in the 10 s before; a run can start earlier
+LOOKBACK_SEC = C.RULES_WINDOW_SEC + 10.0   # whole windows ending at the alarm; onset lies in the last 10 s
 
 
 def _alarm(comments):
