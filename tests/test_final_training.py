@@ -17,6 +17,7 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from munji_ai import config as C
 from munji_ai.data.windows import config_hash
 from munji_ai.train import train_rhythm, train_shockable
 
@@ -83,7 +84,7 @@ def main() -> int:
         check("checkpoint records threshold, augmentation, negatives and rule",
               ck.get("threshold") == 0.65 and ck.get("augment") is True
               and ck.get("extra_negatives") == str(extra)
-              and tuple(ck.get("confirmation")) == (2, 3))
+              and tuple(ck.get("confirmation")) == tuple(C.CONFIRMATION["vf"]))
 
         rc, text = run(train_shockable.main,
                        ["--cache", str(cache), "--out", str(tmp / "sh0"),
@@ -116,7 +117,7 @@ def main() -> int:
         check("trains with augmentation", rc == 0 and "augment     on" in text)
         check("checkpoint records gamma, augmentation and rule",
               ck.get("augment") is True and ck.get("gamma") == 2.0
-              and tuple(ck.get("confirmation")) == (2, 3))
+              and tuple(ck.get("confirmation")) == tuple(C.CONFIRMATION["af"]))
 
     print("\n" + ("ALL CHECKS PASSED" if ok else "FAILURES ABOVE"))
     return 0 if ok else 1

@@ -47,7 +47,11 @@ def ecg(seconds, fs, hr=70.0, seed=0):
 
 
 def main() -> int:
-    rule = C.CONFIRMATION["vf"]
+    # The counting mechanics are checked on fixed 2-of-3 scenarios below; they
+    # were written for that rule, so it is pinned here. The deployment rule,
+    # config.CONFIRMATION["vf"], changes with the operating point and is
+    # exercised end to end further down (--rules).
+    rule = (2, 3)
 
     print("Alarm counting (2 of 3)\n")
     P = np.array([0, 1, 1, 1, 0, 0, 0, 1, 0, 1, 0, 0], dtype=bool)
