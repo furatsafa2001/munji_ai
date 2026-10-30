@@ -117,55 +117,107 @@ def main() -> int:
         out += dl.on_rhythm(10 + i * 15, (0.1, 0.8, 0.1))
     check("no AF alert while a VF episode is active", out == [])
 
-    print("\nRate rules\n")
+    print("\nRate rules: confirmation per family\n")
+
+    def rate(*findings, bpm=float("nan")):
+        return RateReport(bpm=bpm, findings=list(findings))
+
+    def run_rate(dl, reports, t0=0.0, **kw):
+        out = []
+        for i, r in enumerate(reports):
+            out += dl.on_rate(t0 + i * 2.5, r, **kw)
+        return out
+
+    slow = rate(Finding("extreme_bradycardia", "critical", 35))
     dl = DecisionLayer()
-    flat = RateReport(flat=True, findings=[Finding("asystole", "critical", 5.0, gated=True)])
-    out = []
-    for i in range(4):
-        out += dl.on_rate(i * 2.5, flat, usable=False)
-    check("asystole on unusable windows is not alerted", out == [])
-    out = []
-    for i in range(4):
-        out += dl.on_rate(10 + i * 2.5, flat, usable=True)
-    check("asystole on usable windows is alerted once", kinds(out) == ["asystole"])
-    dl = DecisionLayer()
-    slow = RateReport(bpm=35, findings=[Finding("extreme_bradycardia", "critical", 35)])
-    out = []
-    for i in range(6):
-        out += dl.on_rate(i * 2.5, slow)
-    check("a rate finding is confirmed by its own rule and alerted once",
+    out = run_rate(dl, [slow] * 6)
+    check("a rate finding alerts at once (persistence is in the finding) and once",
           kinds(out) == ["extreme_bradycardia"])
 
+    b38 = rate(Finding("extreme_bradycardia", "critical", 38))
+    b41 = rate(Finding("bradycardia", "warning", 41))
+    dl = DecisionLayer()
+    out = run_rate(dl, [b41, b38, b41, b38, b41, b38])
+    check("38/41 wobble is one episode: warning, then one escalation to critical",
+          [(a.kind, a.severity) for a in out]
+          == [("bradycardia", "warning"), ("extreme_bradycardia", "critical")])
+
+    dl = DecisionLayer()
+    out = run_rate(dl, [b38, b41, b38, b41])
+    check("starting critical, a milder window does not re-alert",
+          kinds(out) == ["extreme_bradycardia"])
+
+    info = rate(Finding("bradycardia", "info", 55))
+    dl = DecisionLayer()
+    out = run_rate(dl, [info] * 10)
+    check("info level is never alerted", out == [])
+    check("... but is counted for the report",
+          dl.report()["rate_info_windows"].get("brady") == 10)
+
+    dl = DecisionLayer()
+    out = run_rate(dl, [slow] * 3 + [rate()] * 6 + [slow])
+    check("a new episode after 6 quiet windows alerts again",
+          kinds(out) == ["extreme_bradycardia", "extreme_bradycardia"])
+
+    print("\nRate rules: who judges a finding\n")
+    asy = rate(Finding("asystole", "critical", 7.0))
+    dl = DecisionLayer()
+    out = run_rate(dl, [asy] * 3, usable=False, lead_off=False)
+    check("asystole in gate-rejected windows, leads ON: alerted (the gate is not the judge)",
+          kinds(out) == ["asystole"])
+    dl = DecisionLayer()
+    out = run_rate(dl, [asy] * 3, usable=False, lead_off=None)
+    check("same, lead status unknown: falls back to the gate, not alerted", out == [])
+    dl = DecisionLayer()
+    out = run_rate(dl, [asy] * 3, usable=True, lead_off=None)
+    check("lead status unknown, gate accepts: alerted", kinds(out) == ["asystole"])
+    dl = DecisionLayer()
+    out = run_rate(dl, [asy] * 3, usable=True, lead_off=True)
+    check("leads OFF: nothing cardiac", out == [])
+    check("... counted as lead-off windows", dl.report()["lead_off_windows"] == 3)
+    dl = DecisionLayer()
+    out = run_rate(dl, [asy] * 3, usable=True, lead_off=False, complete=False)
+    check("missing samples: nothing cardiac", out == [])
+    check("... counted as no-data windows", dl.report()["no_data_windows"] == 3)
+
+    tachy = rate(Finding("extreme_tachycardia", "critical", 160))
+    dl = DecisionLayer()
+    out = run_rate(dl, [tachy] * 3, usable=False, lead_off=False)
+    check("a rate finding in gate-rejected windows is not alerted, leads on or not", out == [])
+
+    pause = rate(Finding("pause", "warning", 4.0))
+    dl = DecisionLayer()
+    out = run_rate(dl, [pause, asy, pause], lead_off=False)
+    check("pause then asystole is one absence episode, escalated once",
+          [(a.kind, a.severity) for a in out]
+          == [("pause", "warning"), ("asystole", "critical")])
+
     print("\nVentricular hold on rate findings\n")
-    narrow = RateReport(bpm=180, findings=[Finding("fast_narrow", "warning", 180)])
-    wide = RateReport(bpm=180, findings=[Finding("wide_complex", "critical", 180)])
+    narrow = rate(Finding("extreme_tachycardia", "critical", 180),
+                  Finding("fast_narrow", "warning", 180))
     dl = DecisionLayer()
     out = []
     for i in range(6):
         out += dl.on_shockable(i * 2.5, 0.9 if i == 0 else 0.2, organised())
         out += dl.on_rate(i * 2.5, narrow)
-    check("no SVT alert while ShockableNet saw danger in the last 6 windows",
+    check("no SVT label while ShockableNet saw danger in the last 6 windows",
           "fast_narrow" not in kinds(out))
+    check("... the critical fast rate itself still alerts",
+          "extreme_tachycardia" in kinds(out))
     out = []
-    for i in range(6, 12):
+    for i in range(6, 20):
         out += dl.on_shockable(i * 2.5, 0.1, organised())
-        out += dl.on_rate(i * 2.5, narrow)
-    check("SVT is alerted once ShockableNet has been quiet for 6 windows",
-          kinds(out) == ["fast_narrow"])
+        out += dl.on_rate(i * 2.5, narrow if i >= 14 else rate())
+    check("SVT is labelled once ShockableNet has been quiet for 6 windows",
+          "fast_narrow" in kinds(out))
     dl = DecisionLayer()
     out = []
     for i in range(8):
         out += dl.on_shockable(i * 2.5, 0.9, organised())
-        out += dl.on_rate(i * 2.5, wide)
-    check("a wide-complex finding during VF/VT does not raise a second alert",
+        out += dl.on_rate(i * 2.5, rate(Finding("bradycardia", "warning", 45))
+                          if i >= 4 else rate())
+    check("a warning-level rate finding during an active VF/VT episode is held back",
           kinds(out) == ["VF/VT"])
-    dl = DecisionLayer()
-    out = []
-    for i in range(6):
-        out += dl.on_shockable(i * 2.5, 0.1, organised())
-        out += dl.on_rate(i * 2.5, wide)
-    check("wide complex alone, ShockableNet quiet, is still alerted (slow VT)",
-          kinds(out) == ["wide_complex"])
 
     print("\n" + ("ALL CHECKS PASSED" if ok else "FAILURES ABOVE"))
     return 0 if ok else 1

@@ -247,24 +247,97 @@ NOISE_SNR_DB_RANGE = (-6.0, 20.0)
 AUGMENT_PROB = 0.5
 
 # ------------------------------------------------------------------ rule tiers
-# Engineering proposals. Clinical thresholds are not settled and any value
-# here should be treated as provisional.
-HR_BRADY = {"info": 59, "warning": 49, "critical": 39}   # HR at or below
-HR_TACHY = {"info": 101, "warning": 121, "critical": 151}  # HR at or above
+# Every clinical number here has a published source, written beside it with
+# its comparison. The measured rate is continuous, so "below 60" and "at or
+# below 59" are different rules; the second left 59-60 unclassified.
+#
+# HR_BRADY  rate strictly BELOW the value
+#   info      60  conventional definition of bradycardia
+#   warning   50  2018 ACC/AHA/HRS bradycardia guideline: sinus bradycardia
+#                 is a rate below 50 while awake
+#   critical  40  2018 ACC/AHA/HRS: sinus node dysfunction is diagnosed on
+#                 symptoms with a rate below 40; NEWS2 (Royal College of
+#                 Physicians 2017) gives 40 or less its most abnormal score
+#
+# HR_TACHY  info and warning strictly ABOVE; critical AT OR ABOVE
+#   info     100  conventional definition of tachycardia
+#   warning  110  NEWS2: 111-130 scores 2 (91-110 scores 1)
+#   critical 150  AHA adult tachyarrhythmia algorithm: rate typically >= 150
+#
+# The client's abnormality list shows "< 30" and "> 180" in its Example column
+# for the extreme tiers. They are illustrations there, not thresholds.
+HR_BRADY = {"info": 60, "warning": 50, "critical": 40}     # strictly below
+HR_TACHY = {"info": 100, "warning": 110, "critical": 150}  # see semantics above
+
+# A rate finding needs the rate held over this many consecutive beats.
+# PhysioNet/CinC Challenge 2015 alarm definitions
+# (Clifford et al., Physiol Meas 2016): extreme bradycardia, HR < 40 for 5
+# consecutive beats; extreme tachycardia, HR > 140 for 17 consecutive beats.
+# No source gives a count for the milder tiers, so each tier uses its family's
+# count. These counts replace N-of-M window confirmation for the rate rules.
+RATE_RUN_BEATS = {"brady": 5, "tachy": 17}
+# The rate of a run is 60 / the mean RR after dropping this fraction of the
+# longest and of the shortest intervals, the way bedside monitors average
+# heart rate (the 3 longest and 3 shortest of 16 RR dropped, the residual 10
+# averaged; EC13 requires monitors to disclose their averaging). One missed
+# beat or one pause cannot make or break a run; an irregular fast rhythm
+# (AF at 160) still counts; a burst shorter than half the run does not.
+RATE_RUN_TRIM = 3 / 16
+
+# Pause (warning): longest beat-to-beat gap strictly longer than this.
+# 2018 ACC/AHA/HRS: pauses longer than 3 s in sinus node dysfunction;
+# 2018 ESC syncope guidelines: a symptomatic pause longer than 3 s.
 PAUSE_WARNING_SEC = 3.0
-ASYSTOLE_CRITICAL_SEC = 4.0
+# Asystole (critical): gap strictly longer than this. 2018 ESC syncope
+# guidelines: an asymptomatic pause longer than 6 s is significant on its own.
+# (CinC 2015 used 4 s for ICU alarms; the clinical guideline is preferred.)
+ASYSTOLE_CRITICAL_SEC = 6.0
+
+# Wide QRS at or above this. AHA adult tachyarrhythmia algorithm (QRS >= 0.12 s);
+# wide-complex tachycardia is defined as QRS >= 120 ms.
 NARROW_QRS_MS = 120
+# The fast narrow-complex label uses the same line as the critical tachy tier.
 FAST_NARROW_BPM = 150
+
+# A detected peak counts as a beat only if its QRS is larger than this, peak
+# to valley, in millivolts. ANSI/AAMI EC13: a heart-rate meter must not respond
+# to a QRS of 0.15 mV or less, so that P waves during ventricular standstill
+# are not counted (Drew et al., PLoS ONE 2014). It is also what lets the engine
+# see a real asystole: the R-peak detector's threshold is relative, so on a
+# quiet trace it always "finds" peaks in the noise.
+# The rate engine's input must therefore be in millivolts, never normalised.
+QRS_MIN_AMP_MV = 0.15
+# Amplitude is read over +/- this around each peak: a QRS up to 120 ms, the
+# upper limit of a normal complex (same 120 ms line as above).
+QRS_AMP_HALF_MS = 60
+# Width is searched over +/- this. It must be able to measure the widest
+# complexes reported clinically: 69% of VT exceeds 140 ms (Wellens 1978) and
+# LBBB-pattern VT exceeds 160 ms. The old 60 ms capped every reading at 124 ms.
+QRS_SEARCH_HALF_MS = 100
+# Half-width of the band around NARROW_QRS_MS where width is reported as
+# "uncertain" instead of narrow or wide. Set it from the measured error in
+# eval_qrs_width_qtdb (acceptance: IEC 60601-2-25, mean difference within
+# +/-10 ms, SD 10 ms against expert measurement). None until then: no band.
+QRS_UNCERTAIN_MS = None
+
+# Windows the rate engine runs on, derived from the definitions above, not
+# chosen. 20 s holds a 5-beat run down to 15 bpm (slower is a pause). With a
+# 2.5 s stride a gap longer than 6 s always falls whole inside one window
+# (20 - 2.5 > 6). Latency is the run itself plus at most one stride; EC13 asks
+# monitors to alarm within 10 s of onset.
+RULES_WINDOW_SEC = 20.0
+RULES_STRIDE_SEC = 2.5
 
 # Confirmation windows — N of M consecutive positives before an alert fires.
 # A single window must never trigger a phone call.
+# The rate rules carry their own persistence (beats held, or gap length), so
+# one window with a finding is already confirmed: (1, 1). "asystole" covers
+# the whole absence family (pause and asystole) in the decision layer.
 CONFIRMATION = {
     "vf": (4, 6),
-    "asystole": (2, 3),
-    "wide_complex": (3, 4),
-    "extreme_brady": (3, 4),
-    "extreme_tachy": (3, 4),
-    "pause": (2, 3),
+    "asystole": (1, 1),
+    "extreme_brady": (1, 1),
+    "extreme_tachy": (1, 1),
     "af": (4, 6),
-    "fast_narrow": (3, 4),
+    "fast_narrow": (1, 1),
 }

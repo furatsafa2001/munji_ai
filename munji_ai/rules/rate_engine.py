@@ -1,48 +1,63 @@
-"""Rate engine — the conditions that are arithmetic, not learning.
+"""Rate engine: the conditions that are arithmetic, not learning.
 
-    from munji_ai.rules.rate_engine import analyse
-    findings = analyse(signal)          # one window
-    findings = analyse_stream(windows)  # with N-of-M confirmation
+    from munji_ai.rules.rate_engine import analyse, sliding_reports
+    report = analyse(window_mv)                    # one window
+    for t_end, report in sliding_reports(signal_mv):
+        alerts = decision_layer.on_rate(t_end, report, usable=..., lead_off=...)
 
-Eight of the twenty conditions in the client specification are defined by a
-number, not by a shape: how fast the heart is going, and how long it stops for.
-A classifier is the wrong instrument for those. "Heart rate below 40" is a
-threshold; training a network to rediscover it from examples would make it
-slower, less interpretable, and harder to defend to a regulator who can read
-the rule directly.
-
-    sinus bradycardia       HR at or below HR_BRADY["info"]
-    extreme bradycardia     HR at or below HR_BRADY["critical"]
-    sinus tachycardia       HR at or above HR_TACHY["info"]
-    extreme tachycardia     HR at or above HR_TACHY["critical"]
-    SVT (fast narrow)       HR >= FAST_NARROW_BPM with a narrow QRS
-    wide-complex tachycardia HR >= FAST_NARROW_BPM with a wide QRS
-    pause                   no beat for PAUSE_WARNING_SEC
-    asystole                no beat for ASYSTOLE_CRITICAL_SEC
-
-Every threshold is read from config. Nothing here invents a number.
-
-Where this sits
+What it reports
 ---------------
-After the quality gate, beside the two networks, before the decision layer.
-It runs on the same windows they do and needs only R-peak timing, which is why
-GATE_MIN_P allows it through at 0.60 where the beat classifier demands 0.90:
-morphology can be too poor to classify a complex and still good enough to
-time it.
+Every number comes from config, where each one sits beside its published
+source (2018 ACC/AHA/HRS, 2018 ESC syncope, AHA ACLS, NEWS2, CinC 2015,
+ANSI/AAMI EC13).
 
-Asystole is the one finding that depends on the gate rather than on itself. A
-detached electrode produces a flat trace, and a flat trace is indistinguishable
-from a stopped heart by rate alone. So asystole is reported with a `gated`
-flag: the decision layer must confirm the window passed quality before acting
-on it. Raising a cardiac arrest alarm because a patch came loose would teach a
-patient to ignore the device.
+    bradycardia           rate held below 60 / 50   for 5 beats   info / warning
+    extreme bradycardia   rate held below 40        for 5 beats   critical
+    tachycardia           rate held above 100 / 110 for 17 beats  info / warning
+    extreme tachycardia   rate held at 150 or more  for 17 beats  critical
+    fast narrow           extreme tachycardia with a narrow QRS   warning
+    pause                 no beat for more than 3 s               warning
+    asystole              no beat for more than 6 s               critical
+
+"Held for N beats" means the rate over N consecutive beats meets the
+condition somewhere in the window. The rate of a run is averaged the way
+bedside monitors do it: drop the longest and shortest intervals, average the
+rest. One missed beat or one pause cannot make or break a run, an irregular
+fast rhythm still counts, and a burst shorter than half the run does not. Persistence lives
+here, in the finding, so the decision layer confirms a rate finding from a
+single window (config.CONFIRMATION, (1, 1)).
+
+Wide-complex tachycardia is not reported. On real VT this engine called only
+14% of windows wide, because its width estimate reads short; ventricular
+rhythms are detected in the decision layer from ventricular beats instead.
+The engine still measures QRS width and reports it as narrow, uncertain or
+wide, so the decision layer can decide what to call a fast rhythm.
+
+Input
+-----
+One window of the model path (0.5-40 Hz, notch) in MILLIVOLTS, never
+normalised: the beat amplitude floor (QRS_MIN_AMP_MV, from EC13) is an
+absolute voltage. Windows are RULES_WINDOW_SEC long every RULES_STRIDE_SEC;
+sliding_reports() produces them. A window with missing samples must not be
+analysed at all: a filled gap is a flat stretch, and a flat stretch reads as
+asystole.
+
+Who judges a finding (the decision layer applies this)
+------------------------------------------------------
+Each finding carries a basis:
+
+    "rate"     brady, tachy, fast narrow. Counted only in windows the
+               quality gate accepted, because noise invents beats.
+    "absence"  pause, asystole. Judged by the electrodes, not the gate: a
+               real stopped heart can look like poor signal, and ACLS asks
+               for the leads to be checked before a flat line is called
+               asystole. Counted when the leads are reported on; when lead
+               status is unknown (public recordings), the gate decides.
 
 What it does not do
 -------------------
 It does not diagnose. Sinus bradycardia and complete heart block can produce
-the same rate; distinguishing them needs the P waves, which is the rhythm
-classifier's work, not a threshold's. The findings here are rate observations,
-and the decision layer combines them with the networks' output.
+the same rate. The findings are rate observations.
 """
 
 from __future__ import annotations
@@ -51,44 +66,70 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from ..config import (ASYSTOLE_CRITICAL_SEC, CONFIRMATION, FAST_NARROW_BPM,
-                      HR_BRADY, HR_TACHY, NARROW_QRS_MS, PAUSE_WARNING_SEC,
-                      TARGET_FS)
+from ..config import (ASYSTOLE_CRITICAL_SEC, FAST_NARROW_BPM, HR_BRADY,
+                      HR_TACHY, NARROW_QRS_MS, PAUSE_WARNING_SEC,
+                      QRS_AMP_HALF_MS, QRS_MIN_AMP_MV, QRS_SEARCH_HALF_MS,
+                      QRS_UNCERTAIN_MS, RATE_RUN_BEATS, RATE_RUN_TRIM,
+                      RULES_STRIDE_SEC,
+                      RULES_WINDOW_SEC, TARGET_FS)
 from ..features.sqi import MIN_DYNAMIC_RANGE, detect_r_pantompkins
 
-# Severity names the decision layer routes on. Ordered, so max() means
-# "the most urgent finding in this window".
+# Ordered, so max() means "the most urgent".
 SEVERITY = ("info", "warning", "critical")
+
+# kind -> (family, basis). A family is one phenomenon at several severities;
+# the decision layer confirms per family, so a rate wobbling between two
+# severities still adds up to one episode.
+KINDS = {
+    "bradycardia":         ("brady", "rate"),
+    "extreme_bradycardia": ("brady", "rate"),
+    "tachycardia":         ("tachy", "rate"),
+    "extreme_tachycardia": ("tachy", "rate"),
+    "fast_narrow":         ("fast_narrow", "rate"),
+    "pause":               ("absence", "absence"),
+    "asystole":            ("absence", "absence"),
+}
 
 
 @dataclass
 class Finding:
-    """One rate observation about one window."""
+    """One observation about one window."""
     kind: str
     severity: str
     value: float = float("nan")      # the measurement that triggered it
-    gated: bool = False              # true if a quality check must confirm it
     detail: str = ""
+
+    @property
+    def family(self) -> str:
+        return KINDS[self.kind][0]
+
+    @property
+    def basis(self) -> str:
+        """'rate': needs a gate-accepted window. 'absence': needs leads on."""
+        return KINDS[self.kind][1]
 
     def __repr__(self) -> str:
         v = "" if np.isnan(self.value) else f" {self.value:.1f}"
-        g = " [needs quality confirmation]" if self.gated else ""
-        return f"{self.kind}({self.severity}{v}){g}"
+        return f"{self.kind}({self.severity}{v})"
 
 
 @dataclass
 class RateReport:
     """Everything the engine measured on one window."""
-    bpm: float = float("nan")
+    bpm: float = float("nan")               # median rate, for display
     rr_sec: np.ndarray = field(default_factory=lambda: np.array([]))
+    slow_run_bpm: float = float("nan")      # slowest rate held for the brady run
+    fast_run_bpm: float = float("nan")      # fastest rate held for the tachy run
     qrs_ms: float = float("nan")
+    qrs_class: str = ""                     # "narrow" / "uncertain" / "wide" / ""
     n_beats: int = 0
+    n_rejected: int = 0                     # detector peaks below the EC13 floor
+    longest_gap_sec: float = float("nan")
     flat: bool = False
     findings: list = field(default_factory=list)
 
     @property
     def severity(self) -> str:
-        """Worst severity present, or "" when nothing fired."""
         if not self.findings:
             return ""
         return max((f.severity for f in self.findings), key=SEVERITY.index)
@@ -97,213 +138,258 @@ class RateReport:
         return {f.kind for f in self.findings}
 
 
-def _qrs_width_ms(x: np.ndarray, peaks: np.ndarray, fs: int) -> float:
-    """Median QRS duration, measured as the width of the energy burst.
+# ---------------------------------------------------------------- classify
+# Pure functions: numbers in, findings out. Every threshold boundary is tested
+# on these directly, because a synthetic signal cannot land on an exact rate
+# (250 Hz quantises RR) or an exact width (4 ms steps).
 
-    Not a clinical caliper measurement. The envelope of the squared derivative
-    rises and falls with the complex, so the width at a fraction of its own
-    peak tracks QRS duration closely enough to separate narrow from wide —
-    which is the only distinction asked of it here.
+def classify_rate(slow_bpm: float, fast_bpm: float) -> list:
+    """Brady and tachy findings from the rates held over each family's run."""
+    out = []
+    if not np.isnan(slow_bpm):
+        if slow_bpm < HR_BRADY["critical"]:
+            out.append(Finding("extreme_bradycardia", "critical", slow_bpm))
+        elif slow_bpm < HR_BRADY["warning"]:
+            out.append(Finding("bradycardia", "warning", slow_bpm))
+        elif slow_bpm < HR_BRADY["info"]:
+            out.append(Finding("bradycardia", "info", slow_bpm))
+    if not np.isnan(fast_bpm):
+        if fast_bpm >= HR_TACHY["critical"]:
+            out.append(Finding("extreme_tachycardia", "critical", fast_bpm))
+        elif fast_bpm > HR_TACHY["warning"]:
+            out.append(Finding("tachycardia", "warning", fast_bpm))
+        elif fast_bpm > HR_TACHY["info"]:
+            out.append(Finding("tachycardia", "info", fast_bpm))
+    return out
 
-    A real ventricular complex is broad and slurred; a supraventricular one is
-    sharp. The 120 ms line between them is the clinical convention and comes
-    from config.
+
+def classify_width(qrs_ms: float, band_ms=QRS_UNCERTAIN_MS) -> str:
+    """'narrow', 'uncertain' or 'wide' against NARROW_QRS_MS; '' if unmeasured."""
+    if np.isnan(qrs_ms):
+        return ""
+    if band_ms is not None and abs(qrs_ms - NARROW_QRS_MS) < band_ms:
+        return "uncertain"
+    return "wide" if qrs_ms >= NARROW_QRS_MS else "narrow"
+
+
+def classify_gap(gap_sec: float) -> Finding | None:
+    """Pause or asystole for the longest beat-free stretch in a window."""
+    if np.isnan(gap_sec):
+        return None
+    if gap_sec > ASYSTOLE_CRITICAL_SEC:
+        return Finding("asystole", "critical", gap_sec,
+                       detail=f"no beat for {gap_sec:.1f} s")
+    if gap_sec > PAUSE_WARNING_SEC:
+        return Finding("pause", "warning", gap_sec,
+                       detail=f"no beat for {gap_sec:.1f} s")
+    return None
+
+
+def held_rates(rr_sec: np.ndarray, n_beats: int,
+               trim: float = RATE_RUN_TRIM) -> tuple[float, float]:
+    """(slowest, fastest) rate held over any n consecutive beats.
+
+    The rate of a run is 60 / the mean of its n RR intervals after dropping
+    the longest and the shortest round(n * trim) of them: monitor-style
+    averaging. NaN when the window holds fewer than n intervals: a run that
+    was not seen is not reported, rather than guessed from fewer beats.
     """
-    if len(peaks) < 2:
-        return float("nan")
+    rr = np.asarray(rr_sec, dtype=np.float64)
+    if n_beats < 1 or rr.size < n_beats:
+        return float("nan"), float("nan")
+    k = int(round(n_beats * trim))
+    if n_beats - 2 * k < 1:
+        k = (n_beats - 1) // 2
+    runs = np.sort(np.lib.stride_tricks.sliding_window_view(rr, n_beats), axis=1)
+    mean_rr = runs[:, k:n_beats - k].mean(axis=1)
+    mean_rr = mean_rr[mean_rr > 0]
+    if mean_rr.size == 0:
+        return float("nan"), float("nan")
+    return float(60.0 / mean_rr.max()), float(60.0 / mean_rr.min())
+
+
+# ----------------------------------------------------------------- measure
+
+def qrs_amplitudes_mv(x: np.ndarray, peaks: np.ndarray, fs: int) -> np.ndarray:
+    """Peak-to-valley amplitude around each detected peak (EC13 definition).
+
+    Noise inside the window adds to the reading, so in a noisy window the
+    floor is effectively a little lower than 0.15 mV. The error is towards
+    counting a beat, not towards a false asystole.
+    """
+    half = max(1, int(QRS_AMP_HALF_MS / 1000.0 * fs))
+    amps = np.empty(len(peaks))
+    for i, p in enumerate(peaks):
+        seg = x[max(0, p - half):min(len(x), p + half + 1)]
+        amps[i] = float(np.ptp(seg)) if seg.size else 0.0
+    return amps
+
+
+def qrs_widths_ms(x: np.ndarray, peaks: np.ndarray, fs: int) -> np.ndarray:
+    """Per-beat QRS width estimate: width of the derivative burst.
+
+    Not a caliper measurement. The slope envelope rises and falls with the
+    complex; its width at 30% of its own peak tracks QRS duration. The slope
+    passes through zero at the R apex, so a complex shows as two lobes; lobes
+    closer than 40 ms are joined, anything further (a noise spike, the T wave)
+    is not.
+
+    0.3 and 40 ms have no clinical source and cannot have one. What makes them
+    acceptable is agreement with expert measurement within IEC 60601-2-25
+    limits, which eval_qrs_width_qtdb measures. On synthetic complexes the
+    estimate reads about a quarter short.
+    """
     d = np.abs(np.diff(x, prepend=x[0]))
-    half = max(1, int(0.06 * fs))        # look 60 ms either side of the peak
-    widths = []
-    for p in peaks:
-        lo, hi = max(0, p - half), min(len(d), p + half + 1)
-        seg = d[lo:hi]
+    half = max(1, int(QRS_SEARCH_HALF_MS / 1000.0 * fs))
+    bridge = max(1, int(0.040 * fs))
+    widths = np.full(len(peaks), np.nan)
+    for i, p in enumerate(peaks):
+        seg = d[max(0, p - half):min(len(d), p + half + 1)]
         if seg.size < 3:
             continue
-        thr = 0.3 * float(seg.max())
+        top = int(np.argmax(seg))
+        thr = 0.3 * float(seg[top])
         if thr <= 0:
             continue
         above = np.flatnonzero(seg >= thr)
-        if above.size:
-            widths.append((above[-1] - above[0] + 1) / fs * 1000.0)
-    return float(np.median(widths)) if widths else float("nan")
+        lo = hi = top
+        for j in above[above < top][::-1]:
+            if lo - j > bridge:
+                break
+            lo = j
+        for j in above[above > top]:
+            if j - hi > bridge:
+                break
+            hi = j
+        widths[i] = (hi - lo + 1) / fs * 1000.0
+    return widths
+
+
+def _median_width(x: np.ndarray, peaks: np.ndarray, fs: int) -> float:
+    if len(peaks) < 2:
+        return float("nan")
+    w = qrs_widths_ms(x, peaks, fs)
+    w = w[~np.isnan(w)]
+    return float(np.median(w)) if w.size else float("nan")
+
+
+def detect_beats(x: np.ndarray, fs: int) -> tuple[np.ndarray, int]:
+    """R peaks that pass the EC13 amplitude floor, and how many did not."""
+    peaks = detect_r_pantompkins(x, fs)
+    if len(peaks) == 0:
+        return peaks, 0
+    keep = qrs_amplitudes_mv(x, peaks, fs) > QRS_MIN_AMP_MV
+    return peaks[keep], int((~keep).sum())
 
 
 def analyse(x: np.ndarray, fs: int = TARGET_FS) -> RateReport:
-    """Measure one window and return every rate finding in it."""
+    """Measure one window (model path, millivolts) and return its findings."""
     x = np.asarray(x, dtype=np.float64)
     rep = RateReport()
     dur = len(x) / fs
 
-    # A flat trace is either a stopped heart or a detached electrode, and the
-    # rate cannot tell them apart. Report it, flag it, let the gate decide.
+    # Digitally flat: below one step of the converter. A real asystole drifts
+    # and carries sensor noise; a constant stream points at the equipment,
+    # which ACLS also lists among the causes of a flat line. It is reported as
+    # asystole and flagged, so the decision layer can say to check the device.
     if np.ptp(x) < MIN_DYNAMIC_RANGE or np.std(x) < MIN_DYNAMIC_RANGE:
         rep.flat = True
-        if dur >= ASYSTOLE_CRITICAL_SEC:
-            rep.findings.append(Finding(
-                "asystole", "critical", dur, gated=True,
-                detail="flat trace — confirm the electrodes before alerting"))
+        rep.longest_gap_sec = dur
+        f = classify_gap(dur)
+        if f:
+            f.detail = "flat trace; check the patch and the device"
+            rep.findings.append(f)
         return rep
 
-    peaks = detect_r_pantompkins(x, fs)
+    peaks, rep.n_rejected = detect_beats(x, fs)
     rep.n_beats = len(peaks)
 
-    # --- pauses and asystole ------------------------------------------------
-    # Measured on the gaps including the window edges: a pause that starts
-    # before the window and ends inside it is still a pause.
-    #
-    # Gap length carries about 30 ms of systematic shortening, because the
-    # detector integrates over a 120 ms window and its peak sits slightly
-    # inside the complex rather than on it. Measured against synthetic gaps:
-    # 4.00 s reads as 3.97 s. That matters only within a few tens of
-    # milliseconds of a threshold, and no clinical pause is defined to that
-    # precision — but it does mean a gap reported as 3.97 s may have been
-    # 4.00 s, so the boundary is soft in the safe direction only by accident,
-    # not by design. Worth remembering before anyone tightens the threshold.
-    edges = np.concatenate([[0], peaks, [len(x) - 1]]) if len(peaks) \
-        else np.array([0, len(x) - 1])
-    gaps = np.diff(edges) / fs
-    longest = float(gaps.max()) if gaps.size else dur
-
-    if longest >= ASYSTOLE_CRITICAL_SEC:
-        rep.findings.append(Finding(
-            "asystole", "critical", longest, gated=True,
-            detail=f"no beat for {longest:.1f} s"))
-    elif longest >= PAUSE_WARNING_SEC:
-        rep.findings.append(Finding(
-            "pause", "warning", longest,
-            detail=f"no beat for {longest:.1f} s"))
+    # Gaps include the window edges: a pause that started before the window
+    # is still a pause, measured as at least what the window shows.
+    # Known bias, pinned by a test: the detector's peak is not exactly on the
+    # R apex, so a gap reads a few tens of ms off, in either direction.
+    edges = np.concatenate([[0], peaks, [len(x) - 1]])
+    rep.longest_gap_sec = float(np.diff(edges).max() / fs)
+    f = classify_gap(rep.longest_gap_sec)
+    if f:
+        rep.findings.append(f)
 
     if len(peaks) < 2:
-        return rep                     # nothing else is measurable
-
-    # --- rate ---------------------------------------------------------------
-    # Median rather than mean: one missed beat doubles an RR interval, and a
-    # mean would carry that error into the rate while a median shrugs it off.
+        return rep
     rr = np.diff(peaks) / fs
     rr = rr[rr > 0]
     if rr.size == 0:
         return rep
     rep.rr_sec = rr
     rep.bpm = float(60.0 / np.median(rr))
-    rep.qrs_ms = _qrs_width_ms(x, peaks, fs)
+    rep.slow_run_bpm, _ = held_rates(rr, RATE_RUN_BEATS["brady"])
+    _, rep.fast_run_bpm = held_rates(rr, RATE_RUN_BEATS["tachy"])
+    rep.qrs_ms = _median_width(x, peaks, fs)
+    rep.qrs_class = classify_width(rep.qrs_ms)
 
-    bpm = rep.bpm
-    if bpm <= HR_BRADY["critical"]:
-        rep.findings.append(Finding("extreme_bradycardia", "critical", bpm))
-    elif bpm <= HR_BRADY["warning"]:
-        rep.findings.append(Finding("bradycardia", "warning", bpm))
-    elif bpm <= HR_BRADY["info"]:
-        rep.findings.append(Finding("bradycardia", "info", bpm))
-
-    if bpm >= HR_TACHY["critical"]:
-        rep.findings.append(Finding("extreme_tachycardia", "critical", bpm))
-    elif bpm >= HR_TACHY["warning"]:
-        rep.findings.append(Finding("tachycardia", "warning", bpm))
-    elif bpm >= HR_TACHY["info"]:
-        rep.findings.append(Finding("tachycardia", "info", bpm))
-
-    # --- narrow or wide complex tachycardia ---------------------------------
-    # The distinction that matters clinically. Fast and narrow is
-    # supraventricular and rarely immediately lethal; fast and wide is
-    # ventricular until proven otherwise, and the shockable detector should
-    # already be looking at it.
-    if bpm >= FAST_NARROW_BPM and not np.isnan(rep.qrs_ms):
-        if rep.qrs_ms < NARROW_QRS_MS:
-            rep.findings.append(Finding(
-                "fast_narrow", "warning", bpm,
-                detail=f"QRS {rep.qrs_ms:.0f} ms — supraventricular"))
-        else:
-            rep.findings.append(Finding(
-                "wide_complex", "critical", bpm,
-                detail=f"QRS {rep.qrs_ms:.0f} ms — ventricular until excluded"))
-
+    rep.findings.extend(classify_rate(rep.slow_run_bpm, rep.fast_run_bpm))
+    if (not np.isnan(rep.fast_run_bpm) and rep.fast_run_bpm >= FAST_NARROW_BPM
+            and rep.qrs_class == "narrow"):
+        rep.findings.append(Finding("fast_narrow", "warning", rep.fast_run_bpm,
+                                    detail=f"QRS {rep.qrs_ms:.0f} ms"))
     return rep
 
 
-def analyse_stream(windows, fs: int = TARGET_FS,
-                   usable=None) -> dict:
-    """Run the engine over consecutive windows and apply N-of-M confirmation.
+def sliding_reports(signal: np.ndarray, fs: int = TARGET_FS,
+                    window_sec: float = RULES_WINDOW_SEC,
+                    stride_sec: float = RULES_STRIDE_SEC):
+    """Yield (t_end, report) over a recording at the deployment window/stride.
 
-    `usable` is an optional per-window boolean from the quality gate. Windows
-    marked unusable still get measured — the measurement is informative — but
-    a gated finding in one of them is never confirmed, which is what keeps a
-    loose electrode from being reported as asystole.
-
-    Returns one entry per condition: how many windows raised it, and whether
-    the confirmation rule in config was ever satisfied.
+    t_end is the time in seconds at the end of the window, which is when the
+    device would have the data to decide.
     """
-    reports = [analyse(w, fs) for w in windows]
-    ok = [True] * len(reports) if usable is None else list(usable)
-
-    kinds = sorted({f.kind for r in reports for f in r.findings})
-    out = {}
-    for kind in kinds:
-        rule = CONFIRMATION.get(_rule_key(kind), (2, 3))
-        n, m = rule
-        hits = []
-        for i, r in enumerate(reports):
-            f = next((f for f in r.findings if f.kind == kind), None)
-            hits.append(bool(f) and (ok[i] or not f.gated))
-
-        confirmed = any(sum(hits[max(0, i - m + 1):i + 1]) >= n
-                        for i in range(len(hits)))
-        sev = max((f.severity for r in reports for f in r.findings
-                   if f.kind == kind), key=SEVERITY.index)
-        out[kind] = {"windows": sum(hits), "confirmed": confirmed,
-                     "rule": rule, "severity": sev}
-
-    bpms = np.array([r.bpm for r in reports if not np.isnan(r.bpm)])
-    out["_summary"] = {
-        "windows": len(reports),
-        "median_bpm": float(np.median(bpms)) if bpms.size else float("nan"),
-        "flat_windows": sum(1 for r in reports if r.flat),
-    }
-    return out
-
-
-def _rule_key(kind: str) -> str:
-    """Map a finding name onto its CONFIRMATION entry."""
-    return {
-        "extreme_bradycardia": "extreme_brady",
-        "bradycardia": "extreme_brady",
-        "extreme_tachycardia": "extreme_tachy",
-        "tachycardia": "extreme_tachy",
-    }.get(kind, kind)
+    win, step = int(window_sec * fs), int(stride_sec * fs)
+    for start in range(0, len(signal) - win + 1, step):
+        yield (start + win) / fs, analyse(signal[start:start + win], fs)
 
 
 if __name__ == "__main__":
-    # Synthetic check: every branch should fire on a signal built for it.
-    fs = TARGET_FS
+    # Every branch on a signal built for it. Amplitudes in millivolts.
+    from ..data.preprocess import bandpass
+    from ..config import MODEL_BAND
 
-    def beats(bpm, seconds=10.0, width_ms=80, amp=2.0):
+    fs = TARGET_FS
+    rng = np.random.default_rng(0)
+
+    def beats(bpm, seconds=RULES_WINDOW_SEC, qrs_ms=80, r_mv=1.0, gap=None):
         n = int(seconds * fs)
+        k = np.arange(n)
         x = np.zeros(n)
-        half = max(1, int(width_ms / 1000 * fs / 2))
-        step = 60.0 / bpm
-        t = 0.2
-        while t * fs < n - half:
-            c = int(t * fs)
-            w = np.arange(max(0, c - half), min(n, c + half + 1))
-            x[w] += amp * np.exp(-((w - c) / (half / 1.5)) ** 2)
-            t += step
-        return x + 0.01 * np.random.RandomState(0).randn(n)
+        sd = qrs_ms / 1000.0 * fs / 6.0
+        t, times = 0.4, []
+        while t < seconds - 0.4:
+            times.append(t)
+            t += 60.0 / bpm
+        if gap:
+            g0, glen = gap
+            times = [s for s in times if s <= g0] + [g0 + glen] + \
+                    [s for s in times if s >= g0 + glen + 60.0 / bpm]
+        for s in times:
+            c = int(round(s * fs))
+            x += r_mv * np.exp(-0.5 * ((k - c) / sd) ** 2)
+            x += 0.25 * np.exp(-0.5 * ((k - c - 0.22 * fs) / (0.045 * fs)) ** 2)
+        return bandpass(x + rng.normal(0, 0.02, n), MODEL_BAND)
 
     cases = [
-        ("normal 70 bpm", beats(70)),
-        ("bradycardia 50", beats(50)),
+        ("normal 70", beats(70)),
+        ("bradycardia 55", beats(55)),
+        ("bradycardia 45", beats(45)),
         ("extreme brady 35", beats(35)),
-        ("tachycardia 110", beats(110)),
-        ("extreme tachy 160 narrow", beats(160, width_ms=70)),
-        ("wide complex 160", beats(160, width_ms=160)),
-        ("flat (lead off)", np.zeros(int(10 * fs))),
+        ("tachycardia 105", beats(105)),
+        ("tachycardia 115", beats(115)),
+        ("extreme tachy 160 narrow", beats(160, qrs_ms=70)),
+        ("extreme tachy 160 wide", beats(160, qrs_ms=220)),
+        ("pause 4 s", beats(70, gap=(5.0, 4.0))),
+        ("asystole 7 s", beats(70, gap=(5.0, 7.0))),
+        ("quiet line (real asystole)", bandpass(rng.normal(0, 0.02, int(20 * fs)), MODEL_BAND)),
+        ("digitally flat", np.zeros(int(20 * fs))),
     ]
-    for name, sig_ in cases:
-        r = analyse(sig_, fs)
+    for name, s in cases:
+        r = analyse(s, fs)
         bpm = "   n/a" if np.isnan(r.bpm) else f"{r.bpm:6.1f}"
-        qrs = " n/a" if np.isnan(r.qrs_ms) else f"{r.qrs_ms:4.0f}"
-        print(f"{name:<26} bpm {bpm}  qrs {qrs} ms  "
-              f"{r.findings if r.findings else '—'}")
-
-    print("\nstream, 6 windows of 160 bpm narrow:")
-    for k, v in analyse_stream([beats(160, width_ms=70)] * 6).items():
-        print(f"  {k:<22}{v}")
+        print(f"{name:<28} bpm {bpm}  qrs {r.qrs_class or '-':<9} {r.findings or '-'}")
