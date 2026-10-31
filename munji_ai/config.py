@@ -292,6 +292,15 @@ PAUSE_WARNING_SEC = 3.0
 # guidelines: an asymptomatic pause longer than 6 s is significant on its own.
 # (CinC 2015 used 4 s for ICU alarms; the clinical guideline is preferred.)
 ASYSTOLE_CRITICAL_SEC = 6.0
+# A gap is read as pause or asystole only if it is quiet: nothing inside it
+# reaches this, peak to valley. Monitors meeting EC13 / IEC 60601-2-27 must
+# detect QRS complexes from 0.5 to 5 mV, so a deflection of 0.5 mV inside a
+# "gap" is either a beat the detector missed or artifact: the gap is
+# unreadable, not empty. Asystole is the absence of electrical activity; sensor
+# noise and the P waves of ventricular standstill (about 0.1-0.25 mV) stay
+# below it. Measured need: NSRDB 16272, an hour of motion artifact up to 10 mV
+# read as repeated asystole when beats under it were missed.
+ABSENCE_MAX_PTP_MV = 0.5
 
 # Wide QRS at or above this. AHA adult tachyarrhythmia algorithm (QRS >= 0.12 s);
 # wide-complex tachycardia is defined as QRS >= 120 ms.

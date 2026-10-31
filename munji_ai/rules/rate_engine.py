@@ -72,14 +72,15 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from ..config import (ASYSTOLE_CRITICAL_SEC, FAST_NARROW_BPM,
+from ..config import (ABSENCE_MAX_PTP_MV, ASYSTOLE_CRITICAL_SEC, FAST_NARROW_BPM,
                       FAST_NARROW_LABEL, HR_BRADY, HR_TACHY, NARROW_QRS_MS,
                       NOTIFY_BRADY_BPM, NOTIFY_SUSTAIN_SEC, NOTIFY_TACHY_BPM,
                       PAUSE_WARNING_SEC, QRS_AMP_HALF_MS, QRS_MIN_AMP_MV,
                       QRS_SEARCH_HALF_MS, QRS_UNCERTAIN_MS, RATE_RUN_BEATS,
                       RATE_RUN_TRIM, RULES_STRIDE_SEC, RULES_WINDOW_SEC,
                       TARGET_FS)
-from ..features.sqi import MIN_DYNAMIC_RANGE, detect_r_pantompkins
+from ..features.sqi import MIN_DYNAMIC_RANGE
+from .qrs_detect import detect_qrs
 
 # Ordered, so max() means "the most urgent".
 SEVERITY = ("info", "warning", "critical")
@@ -150,7 +151,8 @@ class RateReport:
     qrs_class: str = ""                     # "narrow" / "uncertain" / "wide" / ""
     n_beats: int = 0
     n_rejected: int = 0                     # detector peaks below the EC13 floor
-    longest_gap_sec: float = float("nan")
+    longest_gap_sec: float = float("nan")     # longest quiet gap
+    unreadable_gap_sec: float = 0.0          # longest gap with activity inside
     flat: bool = False
     findings: list = field(default_factory=list)
 
@@ -361,12 +363,14 @@ def _median_width(x: np.ndarray, peaks: np.ndarray, fs: int) -> float:
 
 
 def detect_beats(x: np.ndarray, fs: int) -> tuple[np.ndarray, int]:
-    """R peaks that pass the EC13 amplitude floor, and how many did not."""
-    peaks = detect_r_pantompkins(x, fs)
-    if len(peaks) == 0:
-        return peaks, 0
-    keep = qrs_amplitudes_mv(x, peaks, fs) > QRS_MIN_AMP_MV
-    return peaks[keep], int((~keep).sum())
+    """R peaks that pass the EC13 amplitude floor, and how many did not.
+
+    Peaks come from the Pan-Tompkins++ decision rules (qrs_detect) with the
+    floor applied inside them, not the single-threshold variant in
+    features.sqi, which loses every beat in a window that contains one burst
+    of large artifact.
+    """
+    return detect_qrs(x, fs, min_amp_mv=QRS_MIN_AMP_MV, count_rejected=True)
 
 
 def analyse(x: np.ndarray, fs: int = TARGET_FS) -> RateReport:
@@ -393,11 +397,29 @@ def analyse(x: np.ndarray, fs: int = TARGET_FS) -> RateReport:
 
     # Gaps include the window edges: a pause that started before the window
     # is still a pause, measured as at least what the window shows.
-    # Known bias, pinned by a test: the detector's peak is not exactly on the
-    # R apex, so a gap reads a few tens of ms off, in either direction.
+    # Known bias, pinned by a test: the R location is not exactly on the apex,
+    # so a gap reads a few tens of ms off, in either direction.
+    #
+    # Only a QUIET gap is a pause: one with 0.5 mV or more inside it (after
+    # trimming the T wave of the beat before and the P wave of the beat after)
+    # holds a beat the detector missed or artifact, and is unreadable.
     edges = np.concatenate([[0], peaks, [len(x) - 1]])
-    rep.longest_gap_sec = float(np.diff(edges).max() / fs)
-    f = classify_gap(rep.longest_gap_sec)
+    after, before = int(0.45 * fs), int(0.25 * fs)
+    quiet, unreadable = 0.0, 0.0
+    for i in range(len(edges) - 1):
+        g = (edges[i + 1] - edges[i]) / fs
+        if g <= PAUSE_WARNING_SEC:
+            continue
+        a = edges[i] + (after if i > 0 else 0)
+        b = edges[i + 1] - (before if i + 1 < len(edges) - 1 else 0)
+        inner = x[a:b] if b > a else x[edges[i]:edges[i + 1]]
+        if inner.size and float(np.ptp(inner)) >= ABSENCE_MAX_PTP_MV:
+            unreadable = max(unreadable, g)
+        else:
+            quiet = max(quiet, g)
+    rep.longest_gap_sec = quiet if quiet else float(np.diff(edges).max() / fs)
+    rep.unreadable_gap_sec = unreadable
+    f = classify_gap(quiet) if quiet else None
     if f:
         rep.findings.append(f)
 

@@ -68,6 +68,7 @@ from ..data import splits as S
 from ..data.loader import _pick_channel, dataset_dir, load_record
 from ..data.registry import get
 from ..decision.decision_layer import RATE_FAMILIES, DecisionLayer
+from ..rules.qrs_detect import detect_qrs
 from ..rules.rate_engine import (SEVERITY, RateReport, analyse, classify_gap,
                                  detect_beats, qrs_amplitudes_mv, rate_findings)
 
@@ -269,13 +270,49 @@ def gap_report(sig: np.ndarray, beats: np.ndarray, missing: np.ndarray,
     return out
 
 
+def alert_diagnosis(sig: np.ndarray, beats: np.ndarray, t_end: float, kind: str,
+                    record: str) -> dict:
+    """Why the engine sent this alert: what happened to each annotated beat.
+
+    Every annotated beat in the alert's window is either found by the engine,
+    seen by the detector but rejected by the EC13 amplitude floor, or never
+    detected. Missed beats lengthen RR intervals, which reads as a slow rate
+    or a pause (Drew et al. 2014).
+    """
+    win = int(C.RULES_WINDOW_SEC * FS)
+    end = int(round(t_end * FS))
+    start = max(0, end - win)
+    x = sig[start:end]
+    ann = beats[(beats >= start) & (beats < end)] - start
+    raw = detect_qrs(x, FS)
+    kept, _ = detect_beats(x, FS)
+    tol = int(0.15 * FS)
+
+    def near(p, arr):
+        return arr.size > 0 and np.min(np.abs(arr - p)) <= tol
+
+    hit = np.array([near(p, kept) for p in ann], dtype=bool)
+    floor_hit = np.array([(not near(p, kept)) and near(p, raw) for p in ann], dtype=bool)
+    found, floor = int(hit.sum()), int(floor_hit.sum())
+    missed = ann[~hit]
+    missed_mv = (float(np.median(qrs_amplitudes_mv(x, missed, FS))) if missed.size
+                 else float("nan"))
+    rep = analyse(x, FS)
+    ref_bpm = float(60.0 / np.median(np.diff(ann) / FS)) if ann.size > 2 else float("nan")
+    qrs = float(np.median(qrs_amplitudes_mv(x, ann, FS))) if ann.size else float("nan")
+    return {"record": record, "t": t_end, "kind": kind, "eng_bpm": rep.bpm,
+            "ref_bpm": ref_bpm, "annotated": int(ann.size), "found": int(found),
+            "floor": int(floor), "undetected": int(ann.size - found - floor),
+            "qrs_mv": qrs, "missed_mv": missed_mv}
+
+
 def evaluate_record(sig: np.ndarray, beats: np.ndarray, missing: np.ndarray,
                     acc: dict, record: str = "") -> None:
     win = int(C.RULES_WINDOW_SEC * FS)
     step = int(C.RULES_STRIDE_SEC * FS)
     cum = np.concatenate([[0], np.cumsum(missing)])
     dl_eng, dl_ref = DecisionLayer(), DecisionLayer()
-    eng_alerts, ref_alerts, eng_alerts_sev = [], [], []
+    eng_alerts, ref_alerts, eng_alerts_sev, eng_alert_kinds = [], [], [], []
     for start in range(0, len(sig) - win + 1, step):
         t = (start + win) / FS
         complete = cum[start + win] - cum[start] == 0
@@ -302,6 +339,7 @@ def evaluate_record(sig: np.ndarray, beats: np.ndarray, missing: np.ndarray,
             if a.severity != "info":
                 eng_alerts.append((t, FAMILY_OF[a.kind]))
                 eng_alerts_sev.append((t, FAMILY_OF[a.kind], a.severity))
+                eng_alert_kinds.append((t, a.kind))
                 acc[f"sev_eng_{FAMILY_OF[a.kind]}_{a.severity}"] += 1
         for a in dl_ref.on_rate(t, ref, usable=True, lead_off=None):
             if a.severity != "info":
@@ -319,6 +357,8 @@ def evaluate_record(sig: np.ndarray, beats: np.ndarray, missing: np.ndarray,
         acc[f"false_{fam}"] += false
         acc[f"spacing_{fam}"].extend(_episode_spacing(eng_alerts_sev, fam))
     acc["gaps"].extend(gap_report(sig, beats, missing, record))
+    for t, kind in eng_alert_kinds:
+        acc["alert_diag"].append(alert_diagnosis(sig, beats, t, kind, record))
     for fam, by_sev in dl_eng.report()["rate_report_windows"].items():
         for sv, n in by_sev.items():
             acc[f"graded_{fam}_{sv}"] += n
@@ -339,6 +379,9 @@ def main():
                     help="skip stretches with no annotated beat for longer than this "
                          "(NSRDB subjects are screened free of significant arrhythmia; "
                          "0 = off, for corpora with real long pauses)")
+    ap.add_argument("--list-alerts", type=int, default=20,
+                    help="print the first N alerts the engine sent, with what "
+                         "happened to the annotated beats in each")
     ap.add_argument("--list-gaps", type=int, default=10,
                     help="print the N longest annotated gaps with their signal")
     a = ap.parse_args()
@@ -359,6 +402,7 @@ def main():
             acc[f"spacing_{fam}"] = []
         acc["gaps"] = []
         acc["dropout_len"] = []
+        acc["alert_diag"] = []
         t0 = time.time()
         for i, name in enumerate(names):
             rec = load_record(ds, name, a.raw, with_annotations=False)
@@ -421,6 +465,38 @@ def main():
             spacing = (f"median {np.median(sp):.0f} min, {np.mean(sp < 10):.0%} within 10 min"
                        if sp.size else "-")
             print(f"  {fam:<12}{rw:>9}{rc:>9}{ew:>9}{ec:>9}{per_day:>9.1f}   {spacing}")
+
+        d = acc["alert_diag"]
+        if d:
+            ann_n = sum(x["annotated"] for x in d)
+            fl = sum(x["floor"] for x in d)
+            und = sum(x["undetected"] for x in d)
+            fnd = sum(x["found"] for x in d)
+            qrs = np.array([x["qrs_mv"] for x in d if np.isfinite(x["qrs_mv"])])
+            mm = np.array([x["missed_mv"] for x in d if np.isfinite(x["missed_mv"])])
+            print(f"\n  why the engine sent its {len(d)} alerts: annotated beats in those windows")
+            if ann_n:
+                print(f"    found {fnd / ann_n:.0%}   rejected by the {C.QRS_MIN_AMP_MV} mV floor "
+                      f"{fl / ann_n:.0%}   never detected {und / ann_n:.0%}   ({ann_n:,} beats)")
+            if qrs.size:
+                print(f"    QRS size in those windows: median {np.median(qrs):.2f} mV")
+            if mm.size:
+                print(f"    size of the MISSED beats: median {np.median(mm):.2f} mV; "
+                      f"{np.mean(mm <= C.QRS_MIN_AMP_MV):.0%} of alerts at or under "
+                      f"{C.QRS_MIN_AMP_MV} mV, {np.mean(mm >= 0.5):.0%} at 0.5 mV or more")
+                print("    (small missed beats: amplitude is the cause; normal-sized: the detector is)")
+            if a.list_alerts:
+                print(f"\n    first {min(a.list_alerts, len(d))}:")
+                print(f"    {'record':<8}{'time':>10}  {'alert':<22}{'eng bpm':>8}{'ref bpm':>8}"
+                      f"{'ann':>5}{'found':>6}{'floor':>6}{'undet':>6}{'QRS mV':>8}{'missed mV':>10}")
+                for x in d[:a.list_alerts]:
+                    eb = f"{x['eng_bpm']:.0f}" if np.isfinite(x["eng_bpm"]) else "-"
+                    rb = f"{x['ref_bpm']:.0f}" if np.isfinite(x["ref_bpm"]) else "-"
+                    qm = f"{x['qrs_mv']:.2f}" if np.isfinite(x["qrs_mv"]) else "-"
+                    mv = f"{x['missed_mv']:.2f}" if np.isfinite(x["missed_mv"]) else "-"
+                    print(f"    {x['record']:<8}{_hms(x['t']):>10}  {x['kind']:<22}{eb:>8}{rb:>8}"
+                          f"{x['annotated']:>5}{x['found']:>6}{x['floor']:>6}{x['undetected']:>6}"
+                          f"{qm:>8}{mv:>10}")
 
         print("\n  graded for the doctor's report, never sent (hours of rhythm):")
         for fam in ("brady", "tachy"):

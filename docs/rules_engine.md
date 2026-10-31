@@ -48,6 +48,31 @@ on those; they report them.
 Beat floor: a detected peak counts only above 0.15 mV peak to valley
 (ANSI/AAMI EC13; Drew et al. 2014).
 
+Quiet gap: a gap is read as pause or asystole only if nothing inside it
+reaches 0.5 mV peak to valley (after trimming the T wave before and the P wave
+after). Monitors meeting EC13 / IEC 60601-2-27 must detect QRS from 0.5 to
+5 mV, so 0.5 mV inside a "gap" is a missed beat or artifact: the gap is
+unreadable (`RateReport.unreadable_gap_sec`), not empty. Asystole is the
+absence of electrical activity.
+
+## Beat detector (`rules/qrs_detect.py`)
+
+Pan-Tompkins++ decision rules (Imtiaz and Khan, arXiv 2211.03171), keeping
+the 1985 Pan-Tompkins structure: adaptive signal and noise levels, threshold 2
+= 0.4 x threshold 1, search-back after 1 s or 166% of the mean RR, a stall rule
+after 1.4 s without a QRS, T-wave rejection by slope, 231 ms refractory.
+
+Ours, labelled as such, each with the measurement that required it:
+
+| Addition | Why |
+|---|---|
+| EC13 floor inside the decisions | a sub-floor peak counts as noise and never lowers the signal level |
+| re-learning after 3.4 s with nothing accepted | 8-10 mV artifact left even the stall rule 17x too high; beats around it: 5.6% found before, 96.6% after |
+| patient QRS-size memory (median of 8 sinus-like beats; recovered beats must be at least half of it; re-learning that finds none keeps the old levels) | the published stall rule counted P waves of 0.20-0.30 mV in ventricular standstill, so asystole read as a normal rate |
+
+`features/sqi.py` keeps its single-threshold detector unchanged: the quality
+baseline depends on it.
+
 ## Not reported by the engine
 
 - Wide-complex tachycardia: 14% of real VT windows called wide.
@@ -99,6 +124,13 @@ Database), and BeatSegmenter mask width.
   counting a beat, not towards a false asystole.
 - A patient whose CM5 QRS is 0.15 mV or less reads as asystole, by the
   standard's design. Check amplitude on the first patch recordings.
+- Ventricular standstill is caught for P waves up to 0.30 mV after a 1 mV QRS,
+  and up to 0.25 mV after a 0.6 mV QRS; a 0.30 mV P wave after a 0.6 mV QRS
+  (half its size) is counted. Both sizes are outside normal ranges together.
+- A gap holding 0.5 mV or more is unreadable, so asystole during large
+  movement (CPR, a fall) is not called by this rule; ShockableNet and the
+  caregiver flow cover that situation.
+- The detector costs about 9 ms per 40 s window in Python.
 
 ## Open
 

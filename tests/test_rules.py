@@ -225,6 +225,49 @@ def main():
     check("an isolated spike does not stretch a narrow complex",
           R.analyse(x).qrs_class == "narrow", f"{R.analyse(x).qrs_ms:.0f} ms")
 
+    print("\n8b. detector: artifact, tall T waves, quiet gaps")
+    from scipy import signal as sg
+    rng = np.random.default_rng(11)
+    times = regular(0.4, 60 / 72, WIN - 0.4)
+    x = ecg(times=times, r_mv=1.9, t_mv=0.4, seed=11)
+    sos = sg.butter(2, [1 / 125, 20 / 125], btype="band", output="sos")
+    bursts = [(10.0, 14.0, 10.0), (25.0, 27.0, 8.0)]
+    for a, b, amp in bursts:
+        seg = sg.sosfiltfilt(sos, rng.normal(0, 1, int((b - a) * FS)))
+        x[int(a * FS):int(b * FS)] += amp * seg / np.ptp(seg)
+    outside = [int(t * FS) for t in times
+               if not any(a - 0.3 <= t <= b + 0.3 for a, b, _ in bursts)]
+    peaks, _ = R.detect_beats(x, FS)
+    got = sum(np.min(np.abs(peaks - c)) <= 0.15 * FS for c in outside)
+    check("beats around 8-10 mV motion artifact are recovered (Pan-Tompkins++ rules)",
+          got / len(outside) >= 0.85, f"{got}/{len(outside)}")
+    r = R.analyse(x)
+    check("... and nothing is sent", not any(f.notify for f in r.findings), str(r.findings))
+    r = R.analyse(ecg(bpm=80, r_mv=1.0, t_mv=1.2))
+    check("tall T waves (1.2 mV, the EC13 test) are not counted as beats",
+          abs(r.bpm - 80) <= 2, f"{r.bpm:.1f} bpm")
+    base = regular(0.4, 0.8, 8.0)
+    after = regular(base[-1] + 7.0, 0.8, WIN - 0.4)
+    x = ecg(times=base + after)
+    a0 = int((base[-1] + 1.0) * FS)
+    k = np.arange(int(4.0 * FS))
+    x[a0:a0 + k.size] += 0.35 * np.sin(2 * np.pi * 0.5 * k / FS)   # slow wander, 0.7 mV p-p
+    r = R.analyse(x)
+    check("a 7 s gap with 0.7 mV of slow wander inside is unreadable, not asystole",
+          "asystole" not in r.kinds() and r.unreadable_gap_sec > 6,
+          f"{r.findings}, unreadable {r.unreadable_gap_sec:.1f} s")
+    for p_mv in (0.12, 0.20, 0.25, 0.30):
+        x = ecg(times=regular(0.4, 0.8, 8.0))
+        p_only = ecg(times=regular(8.4, 0.8, WIN - 0.4), r_mv=0.0, t_mv=0.0, p_mv=p_mv, seed=5)
+        x[int(8.3 * FS):] = p_only[int(8.3 * FS):]
+        r = R.analyse(x)
+        check(f"ventricular standstill, P waves {p_mv:.2f} mV only -> asystole (P waves never counted)",
+              "asystole" in r.kinds(), f"{r.n_beats} beats, {r.findings}")
+    r = R.analyse(ecg(times=base + after))
+    check("the same 7 s gap, quiet, is asystole", "asystole" in r.kinds(), str(r.findings))
+    check("absence needs a quiet gap: the line is the EC13 lower QRS detection bound",
+          C.ABSENCE_MAX_PTP_MV == 0.5)
+
     print("\n9. sliding reports")
     sig = np.concatenate([ecg(bpm=70, seconds=60), ecg(bpm=28, seconds=60, seed=3)])
     reps = list(R.sliding_reports(sig))
