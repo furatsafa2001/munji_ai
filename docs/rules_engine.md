@@ -68,6 +68,7 @@ Ours, labelled as such, each with the measurement that required it:
 |---|---|
 | EC13 floor inside the decisions | a sub-floor peak counts as noise and never lowers the signal level |
 | re-learning after 3.4 s with nothing accepted | 8-10 mV artifact left even the stall rule 17x too high; beats around it: 5.6% found before, 96.6% after |
+| T-wave check needs 360 ms AND half the running RR (the paper: OR) | above 167 bpm every beat was slope-tested; AF at 170-210 bpm counted at 63-71%, most true tachycardia alarms on CinC 2015 missed |
 | patient QRS-size memory (median of 8 sinus-like beats; recovered beats must be at least half of it; re-learning that finds none keeps the old levels) | the published stall rule counted P waves of 0.20-0.30 mV in ventricular standstill, so asystole read as a normal rate |
 
 `features/sqi.py` keeps its single-threshold detector unchanged: the quality

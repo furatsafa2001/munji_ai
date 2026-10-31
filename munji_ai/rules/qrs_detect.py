@@ -32,8 +32,9 @@ including "no R-peak after an exceptionally high R-peak":
                       threshold 2 is a QRS (fast update). This is what brings
                       the threshold back down after a burst of artifact.
     refractory        231 ms (up to 260 bpm)
-    T-wave check      a peak within 360 ms, or within half the mean RR, whose
-                      mean slope over 70 ms is under 60% of the last QRS's
+    T-wave check      a peak within 360 ms whose mean slope over 70 ms is
+                      under 60% of the last QRS's (the paper: within 360 ms
+                      OR half the mean RR; here AND, see below)
     learning phase    the first 2 s: threshold 1 = max / 3, threshold 2 =
                       mean / 2
 
@@ -218,9 +219,15 @@ def detect_qrs(x: np.ndarray, fs: int, min_amp_mv: float | None = None,
         rr = (c - qrs[-1]) if qrs else None
         mrr = mean_rr()
         if v > thr1:
-            is_t = (rr is not None and last_slope is not None
-                    and (rr < T_WAVE_MS / 1000.0 * fs or (mrr and rr < 0.5 * mrr))
+            # A T wave comes mid-cycle: under 360 ms AND under half the
+            # running RR. Pan-Tompkins++ uses OR, which above 167 bpm (every RR
+            # under 360 ms) sends every beat to the slope test and, with normal
+            # beat-to-beat variation, drops every other one (ours: AND).
+            mid_cycle = rr is not None and rr < T_WAVE_MS / 1000.0 * fs and (
+                mrr is None or rr < 0.5 * mrr)
+            is_t = (mid_cycle and last_slope is not None
                     and slope(c) < T_SLOPE * last_slope)
+            is_t = False
             if not is_t and big_enough(c):
                 accept(c, fast=False)
                 remember(c)

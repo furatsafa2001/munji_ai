@@ -243,6 +243,28 @@ def main():
           got / len(outside) >= 0.85, f"{got}/{len(outside)}")
     r = R.analyse(x)
     check("... and nothing is sent", not any(f.notify for f in r.findings), str(r.findings))
+    for bpm in (170, 200):
+        rng2 = np.random.default_rng(bpm)
+        t, times = 0.4, []
+        while t < WIN - 0.4:
+            times.append(t)
+            t += 60 / bpm * rng2.uniform(0.75, 1.25)          # AF-like irregular
+        n2 = int(WIN * FS)
+        k2 = np.arange(n2)
+        x = np.zeros(n2)
+        for tt in times:
+            c = int(tt * FS)
+            a = rng2.uniform(0.7, 1.3)
+            x += a * np.exp(-0.5 * ((k2 - c) / 3.3) ** 2) \
+                + 0.3 * np.exp(-0.5 * ((k2 - c - 0.16 * FS) / (0.03 * FS)) ** 2)
+        x = bandpass(x + rng2.normal(0, 0.03, n2), C.MODEL_BAND)
+        peaks, _ = R.detect_beats(x, FS)
+        check(f"fast irregular rhythm at {bpm} bpm: every beat counted, not every other one",
+              len(peaks) >= 0.95 * len(times), f"{len(peaks)}/{len(times)}")
+    for bpm in (60, 100, 140):
+        r = R.analyse(ecg(bpm=bpm, r_mv=1.0, t_mv=1.2))
+        check(f"tall T waves at {bpm} bpm are not counted twice", abs(r.bpm - bpm) <= 3,
+              f"{r.bpm:.1f} bpm")
     r = R.analyse(ecg(bpm=80, r_mv=1.0, t_mv=1.2))
     check("tall T waves (1.2 mV, the EC13 test) are not counted as beats",
           abs(r.bpm - 80) <= 2, f"{r.bpm:.1f} bpm")
