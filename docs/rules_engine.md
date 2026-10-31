@@ -23,23 +23,23 @@ so, and those are measurement constants with an acceptance test instead.
 mean RR after dropping the longest and shortest 3/16, the way bedside monitors
 average heart rate.
 
-### Sent (ambulatory telemetry practice, MCOT)
+### Sent (patch-monitoring criteria: MCOT and ARIC)
 
-| Notification | Condition | Level | Alert severity |
-|---|---|---|---|
-| sustained bradycardia | 30 bpm or less, held 30 s | emergent | critical |
-| sustained tachycardia | 180 bpm or more, held 30 s | urgent | warning |
-| pause | no beat for more than 3 s | urgent | warning |
-| asystole | no beat for more than 6 s | emergent | critical |
-| wide-complex rhythm | 150 bpm for 6 s | ventricular-beat detector, not this engine | |
+| Notification | Condition | Level | Alert severity | Source |
+|---|---|---|---|---|
+| sustained bradycardia | below 40 bpm, held 30 s | urgent | warning | ARIC (Zio patch, older adults): < 40 for > 30 s |
+| profound bradycardia | 30 bpm or less, held 30 s | emergent | critical | MCOT |
+| sustained tachycardia | 180 bpm or more, held 30 s | urgent | warning | MCOT (>= 180, 30 s); ARIC (> 180, 60 s) |
+| pause | no beat for more than 3 s | urgent | warning | MCOT; 2018 ACC/AHA/HRS |
+| asystole | no beat for more than 6 s | emergent | critical | MCOT; 2018 ESC syncope |
+| wide-complex rhythm | | ventricular-beat detector, not this engine | | ARIC: > 120 for 30 s; MCOT: >= 150 for 6 s |
 
-Sources: physician-notification criteria of a commercial MCOT service (Philips
-BioTel protocol, J Cardiol Curr Res): pause >= 3 s, SVT/AF >= 180 for >= 30 s,
-bradycardia <= 30 for >= 30 s, wide complex >= 150 for >= 6 s. In a
-retrospective series of 26,438 MCOT patients the potentially emergent events
-were wide-complex tachycardia, pauses >= 6 s and sustained bradycardia < 30.
-The 6 s pause line is also 2018 ESC syncope. The client's abnormality list
-gives the same 30 and 180 as its examples.
+Checked against the literature before adoption. Below 40: pacing guidelines
+treat an awake rate below 40 as significant even without clear symptoms;
+caveat, they say awake, and the patch cannot tell sleep from waking. 150-180:
+the AHA 150 line is a bedside rule for whether a fast rate explains a
+patient's instability, not a monitoring alert threshold; it stays in the
+report.
 
 Why two layers: on one healthy NSRDB day the graded tiers fired about 90
 warnings (sleep below 50, walking above 110). Telemetry services do not notify

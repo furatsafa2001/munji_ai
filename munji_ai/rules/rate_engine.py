@@ -19,8 +19,9 @@ Two layers, kept apart:
     tachycardia           rate held above 100 / 110 for 17 beats  info / warning
     extreme tachycardia   rate held at 150 or more  for 17 beats  critical
 
-    for notification (Finding.notify; MCOT practice)
-    sustained bradycardia rate at or below 30, held 30 s          emergent
+    for notification (Finding.notify; MCOT and ARIC patch-monitoring criteria)
+    sustained bradycardia rate below 40, held 30 s                urgent
+    profound bradycardia  rate at or below 30, held 30 s          emergent
     sustained tachycardia rate at or above 180, held 30 s         urgent
     pause                 no beat for more than 3 s               urgent
     asystole              no beat for more than 6 s               emergent
@@ -74,7 +75,8 @@ import numpy as np
 
 from ..config import (ABSENCE_MAX_PTP_MV, ASYSTOLE_CRITICAL_SEC, FAST_NARROW_BPM,
                       FAST_NARROW_LABEL, HR_BRADY, HR_TACHY, NARROW_QRS_MS,
-                      NOTIFY_BRADY_BPM, NOTIFY_SUSTAIN_SEC, NOTIFY_TACHY_BPM,
+                      NOTIFY_BRADY_EMERGENT_BPM, NOTIFY_BRADY_URGENT_BPM,
+                      NOTIFY_SUSTAIN_SEC, NOTIFY_TACHY_URGENT_BPM,
                       PAUSE_WARNING_SEC, QRS_AMP_HALF_MS, QRS_MIN_AMP_MV,
                       QRS_SEARCH_HALF_MS, QRS_UNCERTAIN_MS, RATE_RUN_BEATS,
                       RATE_RUN_TRIM, RULES_STRIDE_SEC, RULES_WINDOW_SEC,
@@ -92,6 +94,7 @@ KINDS = {
     "bradycardia":           ("brady", "rate"),
     "extreme_bradycardia":   ("brady", "rate"),
     "sustained_bradycardia": ("brady", "rate"),
+    "profound_bradycardia":  ("brady", "rate"),
     "tachycardia":           ("tachy", "rate"),
     "extreme_tachycardia":   ("tachy", "rate"),
     "sustained_tachycardia": ("tachy", "rate"),
@@ -103,7 +106,8 @@ KINDS = {
 # kind -> notification level (MCOT practice). Kinds not listed are for the
 # report only and are never sent to anyone.
 NOTIFY = {
-    "sustained_bradycardia": "emergent",
+    "sustained_bradycardia": "urgent",
+    "profound_bradycardia":  "emergent",
     "sustained_tachycardia": "urgent",
     "pause":                 "urgent",
     "asystole":              "emergent",
@@ -195,10 +199,14 @@ def classify_sustained(slow_bpm: float, fast_bpm: float) -> list:
     """Notification findings from the rates held for NOTIFY_SUSTAIN_SEC."""
     out = []
     held = f"held {NOTIFY_SUSTAIN_SEC:.0f} s"
-    if not np.isnan(slow_bpm) and slow_bpm <= NOTIFY_BRADY_BPM:
-        out.append(Finding("sustained_bradycardia", "critical", slow_bpm,
-                           detail=f"heart rate {slow_bpm:.0f}, {held}"))
-    if not np.isnan(fast_bpm) and fast_bpm >= NOTIFY_TACHY_BPM:
+    if not np.isnan(slow_bpm):
+        if slow_bpm <= NOTIFY_BRADY_EMERGENT_BPM:
+            out.append(Finding("profound_bradycardia", "critical", slow_bpm,
+                               detail=f"heart rate {slow_bpm:.0f}, {held}"))
+        elif slow_bpm < NOTIFY_BRADY_URGENT_BPM:
+            out.append(Finding("sustained_bradycardia", "critical", slow_bpm,
+                               detail=f"heart rate {slow_bpm:.0f}, {held}"))
+    if not np.isnan(fast_bpm) and fast_bpm >= NOTIFY_TACHY_URGENT_BPM:
         out.append(Finding("sustained_tachycardia", "critical", fast_bpm,
                            detail=f"heart rate {fast_bpm:.0f}, {held}"))
     return out

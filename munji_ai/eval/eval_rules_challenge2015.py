@@ -54,11 +54,18 @@ ALARMS = {
     "bradycardia": {"extreme_bradycardia"},
     "tachycardia": {"extreme_tachycardia"},
 }
+# finding kinds that are SENT to the caregiver for each alarm type
+NOTIFIED = {
+    "asystole": {"asystole", "pause"},
+    "bradycardia": {"sustained_bradycardia", "profound_bradycardia"},
+    "tachycardia": {"sustained_tachycardia"},
+}
 # lead preference: chest leads first, CM5 being a chest position
 LEAD_ORDER = ("V", "V5", "V4", "V6", "MCL", "II", "I", "III", "AVF", "AVL", "AVR")
 
 ALARM_SEC = 300.0      # alarm onset in every record
 LOOKBACK_SEC = C.RULES_WINDOW_SEC + 10.0   # whole windows ending at the alarm; onset lies in the last 10 s
+AFTER_SEC = 30.0       # long records ("l") carry 30 s past the alarm
 
 
 def _alarm(comments):
@@ -91,13 +98,17 @@ ECG_NAMES = {"I", "II", "III", "V", "V1", "V2", "V3", "V4", "V5", "V6",
              "AVR", "AVL", "AVF", "MCL"}
 
 
-def _run_lead(x, fs):
-    """Engine over the seconds before the alarm on one lead."""
+def _run_lead(x, fs, after_sec=0.0):
+    """Engine over the seconds before the alarm (and after it, if asked)."""
     a = int((ALARM_SEC - LOOKBACK_SEC) * fs)
     b = int(ALARM_SEC * fs)
     seg = x[a:b]
     if seg.size < (b - a) or np.isnan(seg).any():
         return None
+    if after_sec > 0:
+        tail = x[b:min(len(x), b + int(after_sec * fs))]
+        if tail.size and not np.isnan(tail).any():
+            seg = np.concatenate([seg, tail])
     reps = [r for _, r in sliding_reports(model_path(seg, fs), C.TARGET_FS)]
     kinds = set().union(*(r.kinds() for r in reps)) if reps else set()
     gaps = [r.longest_gap_sec for r in reps if np.isfinite(r.longest_gap_sec)]
@@ -148,10 +159,20 @@ def evaluate(data_dir: Path, out_csv: Path | None = None) -> dict:
         pname = rec.sig_name[pch] if pch is not None else None
         pref = leads.get(pname) if pname else None
         raised = bool(pref and (pref["kinds"] & ALARMS[kind]))
+        notified = bool(pref and (pref["kinds"] & NOTIFIED[kind]))
+        # A notification needs the rate held 30 s, but the Challenge places
+        # the event's onset at most 10 s before the alarm. Only long records
+        # carry the 30 s that follow; the "sent" figure is judged on them.
+        is_long = len(rec.p_signal) >= int((ALARM_SEC + AFTER_SEC) * fs) - 1
+        notified_long = None
+        if is_long and pch is not None:
+            after = _run_lead(rec.p_signal[:, pch], fs, after_sec=AFTER_SEC)
+            notified_long = bool(after and (after["kinds"] & NOTIFIED[kind]))
         raised_any = any(r and (r["kinds"] & ALARMS[kind]) for r in leads.values())
         row = {"record": hea.stem, "alarm": kind, "true": label, "lead": pname,
                "status": "ok" if pref is not None else "no_data",
-               "raised": raised, "raised_any_lead": raised_any,
+               "raised": raised, "notified": notified, "long": is_long,
+               "notified_with_after": notified_long, "raised_any_lead": raised_any,
                "leads": " ".join(leads)}
         if pref is not None:
             row.update({"longest_gap_s": round(pref["gap"], 2),
@@ -182,6 +203,12 @@ def evaluate(data_dir: Path, out_csv: Path | None = None) -> dict:
             "raised_on_true_any": sum(r["raised_any_lead"] for r in t),
             "false_alarms": len(f),
             "raised_on_false": sum(r["raised"] for r in f),
+            "notified_on_true": sum(r["notified"] for r in t),
+            "notified_on_false": sum(r["notified"] for r in f),
+            "long_true": sum(1 for r in t if r["long"]),
+            "long_false": sum(1 for r in f if r["long"]),
+            "long_notified_true": sum(1 for r in t if r["long"] and r["notified_with_after"]),
+            "long_notified_false": sum(1 for r in f if r["long"] and r["notified_with_after"]),
             "no_data": sum(1 for r in rows if r["alarm"] == kind and r["status"] != "ok"),
             "reasons": reasons,
         }
@@ -212,6 +239,22 @@ def main():
         ours = s["raised_on_true"] / in_scope if in_scope else float("nan")
         print(f"{kind:<12}{s['true_alarms']:>6}{s['raised_on_true']:>8}{sens:>7.2f}{ours:>14.2f}{anyl:>10.2f}"
               f"{s['false_alarms']:>8}{s['raised_on_false']:>8}{far:>7.2f}{s['no_data']:>9}")
+    print(f"\n{'sent to the caregiver':<24}{'true':>6}{'sent':>6}{'share':>7}{'false':>8}{'sent':>6}{'share':>7}")
+    for kind, s in res["summary"].items():
+        a = s["notified_on_true"] / s["true_alarms"] if s["true_alarms"] else float("nan")
+        b = s["notified_on_false"] / s["false_alarms"] if s["false_alarms"] else float("nan")
+        print(f"  {kind:<22}{s['true_alarms']:>6}{s['notified_on_true']:>6}{a:>7.2f}"
+              f"{s['false_alarms']:>8}{s['notified_on_false']:>6}{b:>7.2f}")
+    print(f"\n{'sent, long records incl. 30 s after':<36}{'true':>6}{'sent':>6}{'share':>7}{'false':>8}{'sent':>6}{'share':>7}")
+    for kind, s in res["summary"].items():
+        a = s["long_notified_true"] / s["long_true"] if s["long_true"] else float("nan")
+        b = s["long_notified_false"] / s["long_false"] if s["long_false"] else float("nan")
+        print(f"  {kind:<34}{s['long_true']:>6}{s['long_notified_true']:>6}{a:>7.2f}"
+              f"{s['long_false']:>8}{s['long_notified_false']:>6}{b:>7.2f}")
+    print("  (the event starts at most 10 s before the alarm, so a rule that needs 30 s"
+          "\n   held can only be judged where the record continues past it)")
+    print("  (raised = graded for the report; sent = notified: pause/asystole, a rate"
+          "\n   below 40 or at or above 180 held 30 s, or at or below 30 held 30 s)")
     print("\nat our lines: sensitivity once the true alarms that sit below our thresholds by"
           "\ndesign (tachy 140-150, asystole 4-6 s, brady 40-45 within EC13 tolerance) are set"
           "\naside; the Challenge uses ICU limits, the engine uses the clinical sources in config.")

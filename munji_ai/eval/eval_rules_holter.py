@@ -36,8 +36,8 @@ before it, and how many beats the engine finds there. A real pause sits on a
 live baseline after normal-sized complexes; a detached or failing electrode
 shows a collapse in amplitude that nobody annotated.
 
-Only notification findings become alerts (MCOT practice: sustained rate at
-or below 30 or at or above 180 for 30 s, pauses, asystole); the graded tiers
+Only notification findings become alerts (rate below 40 or at or above 180
+held 30 s, at or below 30 held 30 s, pauses, asystole); the graded tiers
 are summarised as hours for the doctor's report. Alerts are split by severity, and the time from each alert to the previous
 one of the same family is summarised: a rate hovering at a threshold re-opens
 an episode every time it crosses, and that shows here as alerts minutes apart.
@@ -79,7 +79,7 @@ BEAT_SYMBOLS = set("NLRBAaJSVrFejnE/fQ?")
 MATCH_SEC = 30.0
 FROZEN_SEC = 0.5          # a raw value unchanged this long is a dropout, not ECG
 FAMILY_OF = {"bradycardia": "brady", "extreme_bradycardia": "brady",
-             "sustained_bradycardia": "brady",
+             "sustained_bradycardia": "brady", "profound_bradycardia": "brady",
              "tachycardia": "tachy", "extreme_tachycardia": "tachy",
              "sustained_tachycardia": "tachy",
              "pause": "absence", "asystole": "absence", "fast_narrow": "fast_narrow"}

@@ -332,27 +332,39 @@ QRS_UNCERTAIN_MS = None
 # ------------------------------------------------------------------ notification
 # Which findings reach the caregiver. Everything else goes to the report.
 #
-# Source: ambulatory cardiac telemetry practice (MCOT), the same class of
-# device as this patch, rather than ICU alarm limits. Physician-notification
-# criteria of a commercial MCOT service (Philips BioTel MCOT protocol, as
-# published in J Cardiol Curr Res, "Outpatient cardiac telemetry monitoring
-# for early patient discharge"): pause of
-# 3 s or more; SVT or AF at 180 bpm or more for 30 s or more; bradycardia at
-# 30 bpm or less for 30 s or more; wide-complex tachycardia at 150 bpm or more
-# for 6 s or more. In a retrospective series of 26,438 MCOT patients (cited in
-# payer medical-policy reviews of MCOT) the potentially emergent events were
-# wide-complex tachycardia, pauses of 6 s or longer, and sustained bradycardia
-# below 30 bpm. The client's abnormality list gives the same 30 and 180 as its
-# examples for the extreme tiers.
+# Base: ambulatory cardiac telemetry practice (MCOT), the same class of device
+# as this patch. Physician-notification criteria of a commercial MCOT service
+# (Philips BioTel MCOT protocol, as published in J Cardiol Curr Res,
+# "Outpatient cardiac telemetry monitoring for early patient discharge"):
+# pause of 3 s or more; SVT or AF at 180 bpm or more for 30 s or more;
+# bradycardia at 30 bpm or less for 30 s or more; wide-complex tachycardia at
+# 150 bpm or more for 6 s or more. In a retrospective series of 26,438 MCOT
+# patients (cited in payer medical-policy reviews of MCOT) the potentially
+# emergent events were wide-complex tachycardia, pauses of 6 s or longer, and
+# sustained bradycardia below 30 bpm.
 #
-#   sustained bradycardia  rate at or below 30, held 30 s    emergent
-#   sustained tachycardia  rate at or above 180, held 30 s   urgent
-#   pause                  gap longer than PAUSE_WARNING_SEC    urgent
+# Bradycardia below 40 held 30 s is also sent (team decision for elderly users
+# at home, checked against the literature): the ARIC study's alert criteria
+# for the Zio single-lead patch in older adults include "bradycardia < 40 bpm
+# sustained for > 30 seconds"; pacing guidelines treat an awake rate below 40
+# as significant even without clear symptoms (ACC/AHA; ESC 2008/2021). Caveat:
+# the guidelines say awake, and the patch cannot tell sleep from waking.
+# Tachycardia stays at the monitoring line, 180: MCOT (>= 180 for 30 s) and
+# ARIC (narrow QRS > 180 for 60 s). The AHA 150 line is a bedside rule for
+# whether a fast rate explains a patient's instability, not a monitoring alert
+# threshold, so 150-180 goes to the report.
+#
+#   sustained bradycardia  rate below 40, held 30 s          urgent    (ARIC)
+#   profound bradycardia   rate at or below 30, held 30 s    emergent  (MCOT)
+#   sustained tachycardia  rate at or above 180, held 30 s   urgent    (MCOT, ARIC)
+#   pause                  gap longer than PAUSE_WARNING_SEC     urgent
 #   asystole               gap longer than ASYSTOLE_CRITICAL_SEC emergent
-#   wide-complex rhythm    150 bpm for 6 s: ventricular-beat detector, not here
+#   wide-complex rhythm    ventricular-beat detector, not here (ARIC: wide QRS
+#                          > 120 bpm for 30 s; MCOT: >= 150 for 6 s)
 NOTIFY_SUSTAIN_SEC = 30.0
-NOTIFY_BRADY_BPM = 30           # at or below, held for NOTIFY_SUSTAIN_SEC
-NOTIFY_TACHY_BPM = 180          # at or above, held for NOTIFY_SUSTAIN_SEC
+NOTIFY_BRADY_URGENT_BPM = 40       # strictly below, held NOTIFY_SUSTAIN_SEC
+NOTIFY_BRADY_EMERGENT_BPM = 30     # at or below, held NOTIFY_SUSTAIN_SEC
+NOTIFY_TACHY_URGENT_BPM = 180      # at or above, held NOTIFY_SUSTAIN_SEC
 
 # The "fast narrow" (SVT) label rests on the QRS width estimate, which failed
 # against hand-measured QRS on the QT Database: mean -50 ms, SD 35 ms against

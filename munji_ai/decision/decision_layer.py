@@ -53,20 +53,20 @@ AF (RhythmNet, every 15 s)
     windows count neither way. OTHER is never alerted.
 
 Rate rules (rate engine)
-    Who is told follows ambulatory cardiac telemetry (MCOT) practice, the same
-    class of device as this patch, not ICU alarm limits. Only four rate
-    findings are ever sent (config, "notification"):
+    Who is told follows patch-monitoring practice: MCOT notification criteria
+    and the ARIC study's alert criteria for the Zio patch in older adults.
+    Only these rate findings are ever sent (config, "notification"):
 
-        sustained bradycardia   30 bpm or less held 30 s     emergent -> critical
+        sustained bradycardia   below 40 held 30 s           urgent   -> warning
+        profound bradycardia    30 bpm or less held 30 s     emergent -> critical
         sustained tachycardia   180 bpm or more held 30 s    urgent   -> warning
         pause                   no beat for more than 3 s    urgent   -> warning
         asystole                no beat for more than 6 s    emergent -> critical
 
-    Every other rate finding (below 60 / 50 / 40, above 100 / 110 / 150) is
-    graded and counted for the doctor's report, never sent. On a healthy
-    NSRDB day those tiers produced about 90 warnings: the rate really does
-    cross 50 asleep and 110 walking, which is why telemetry services do not
-    notify on them.
+    Every other rate finding (below 60 / 50, above 100 / 110, 150-180, and
+    the critical tiers when not held 30 s) is graded and counted for the
+    doctor's report, never sent. On a healthy NSRDB day those tiers produced about 90
+    warnings: the rate really does cross 50 asleep and 110 walking.
 
     The engine holds each finding over its run (beats, 30 s, or the gap), so
     one window is confirmed (config.CONFIRMATION, (1, 1)). Findings are

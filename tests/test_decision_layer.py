@@ -141,12 +141,22 @@ def main() -> int:
     out = run_rate(dl, [rate(Finding("tachycardia", "warning", 115))] * 20)
     check("tachycardia above 110 (warning tier) is never sent", out == [])
 
-    s_brady = rate(Finding("extreme_bradycardia", "critical", 28),
-                   Finding("sustained_bradycardia", "critical", 28))
+    s_brady = rate(Finding("extreme_bradycardia", "critical", 35),
+                   Finding("sustained_bradycardia", "critical", 35))
+    p_brady = rate(Finding("extreme_bradycardia", "critical", 28),
+                   Finding("profound_bradycardia", "critical", 28))
     dl = DecisionLayer()
     out = run_rate(dl, [s_brady] * 6)
-    check("sustained bradycardia (30 or less for 30 s) is sent once, as critical",
-          sev(out) == [("sustained_bradycardia", "critical")])
+    check("below 40 held 30 s is sent once, as warning (urgent)",
+          sev(out) == [("sustained_bradycardia", "warning")])
+    dl = DecisionLayer()
+    out = run_rate(dl, [p_brady] * 6)
+    check("30 or less held 30 s is sent once, as critical (emergent)",
+          sev(out) == [("profound_bradycardia", "critical")])
+    dl = DecisionLayer()
+    out = run_rate(dl, [s_brady, s_brady, p_brady, p_brady, s_brady])
+    check("35 then 28: one episode, urgent then one escalation to emergent",
+          sev(out) == [("sustained_bradycardia", "warning"), ("profound_bradycardia", "critical")])
     s_tachy = rate(Finding("sustained_tachycardia", "critical", 190))
     dl = DecisionLayer()
     out = run_rate(dl, [s_tachy] * 6)
