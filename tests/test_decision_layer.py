@@ -12,7 +12,8 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from munji_ai.decision.decision_layer import DecisionLayer
+from munji_ai import config as C
+from munji_ai.decision.decision_layer import DecisionConfig, DecisionLayer, beats_from_mask
 from munji_ai.rules.rate_engine import Finding, RateReport
 
 ok = True
@@ -215,6 +216,180 @@ def main() -> int:
         out += dl.on_rate(i * 2.5, asy if i >= 4 else rate(), lead_off=False)
     check("an emergent rate alert during VF/VT still goes out",
           kinds(out) == ["VF/VT", "asystole"])
+
+    print("\nBeats: reading and de-duplication\n")
+
+    def stream(pattern, t0=0.0):
+        """pattern: [(cls, bpm, count)] -> [(t, cls)] in time order."""
+        out, t = [], t0
+        for cls, bpm, n in pattern:
+            for _ in range(n):
+                out.append((t, cls))
+                t += 60.0 / bpm
+        return out
+
+    def feed(dl, beats, win=20.0, stride=10.0, usable=lambda te: True, shift=0.004,
+             until=None):
+        """Overlapping beat windows, the same beat a few ms apart in each.
+
+        until: stop at this time, so later calls (e.g. a shock alert) come in
+        time order, as they do in the app.
+        """
+        alerts, end = [], beats[-1][0] + stride
+        te, k = beats[0][0] + stride, 0
+        while te <= (end + win if until is None else until):
+            inside = [(bt + (shift if k % 2 else 0.0), c) for bt, c in beats if te - win < bt <= te]
+            alerts += dl.on_beats(te, inside, usable=usable(te))
+            te += stride
+            k += 1
+        return alerts
+
+    mask = np.zeros(500, int)
+    mask[100:120] = C.BEAT_CLASSES.index("N")
+    mask[300:330] = C.BEAT_CLASSES.index("PVC")
+    got = beats_from_mask(mask, t_start=10.0)
+    check("mask -> beats: centre time and class, background skipped",
+          got == [(10.0 + 110 / 250, "N"), (10.0 + 315 / 250, "PVC")], str(got))
+
+    b = stream([("N", 75, 100)])
+    dl = DecisionLayer()
+    feed(dl, b)
+    check("overlapping windows: every beat counted once", dl.beat_counts["N"] == 100,
+          str(dl.beat_counts))
+
+    print("\nNSVT (report only)\n")
+    dl = DecisionLayer()
+    out = feed(dl, stream([("N", 75, 30), ("PVC", 150, 4), ("N", 75, 30)]))
+    check("4 PVCs at 150 bpm: one NSVT in the report, no alert",
+          dl.report()["nsvt"] == 1 and out == [], str(dl.nsvt))
+    dl = DecisionLayer()
+    feed(dl, stream([("N", 75, 30), ("PVC", 150, 2), ("N", 75, 30)]))
+    check("a couplet (2 PVCs) is not NSVT", dl.report()["nsvt"] == 0)
+    dl = DecisionLayer()
+    feed(dl, stream([("N", 75, 30), ("PVC", 90, 5), ("N", 75, 30)]))
+    check("5 PVCs at 90 bpm is not NSVT (rate must be above 100)", dl.report()["nsvt"] == 0)
+
+    print("\nSustained VT -> WCT alert\n")
+    dl = DecisionLayer()
+    out = feed(dl, stream([("N", 75, 30), ("PVC", 150, 100), ("N", 75, 30)]))
+    sev = [(a.kind, a.severity) for a in out]
+    check("40 s of PVCs at 150 bpm: one WCT alert, emergent (critical)",
+          sev == [("WCT", "critical")], str(sev))
+    check("... recorded as a run of 30 s or more, not NSVT",
+          len(dl.long_runs) == 1 and dl.report()["nsvt"] == 0)
+    run = []
+    for i in range(100):
+        run.append(("N" if i % 7 == 6 else "PVC", 150, 1))
+    dl = DecisionLayer()
+    out = feed(dl, stream([("N", 75, 30)] + run + [("N", 75, 30)]))
+    check("1 beat in 7 missed by the model (86% PVC): still one WCT alert",
+          kinds(out) == ["WCT"], str(kinds(out)))
+    check("... while the strict consecutive rule only saw short pieces",
+          len(dl.long_runs) == 0 and dl.report()["nsvt"] > 1, f"nsvt {dl.report()['nsvt']}")
+    run = [("N" if i % 3 == 2 else "PVC", 150, 1) for i in range(100)]
+    dl = DecisionLayer()
+    out = feed(dl, stream([("N", 75, 30)] + run + [("N", 75, 30)]))
+    check("67% PVC: no WCT alert", "WCT" not in kinds(out))
+    dl = DecisionLayer()
+    out = feed(dl, stream([("N", 75, 30), ("PVC", 90, 60), ("N", 75, 30)]))
+    check("PVCs held 40 s at 90 bpm: no WCT alert (rate must be above 100)", "WCT" not in kinds(out))
+    b = stream([("N", 75, 30), ("PVC", 150, 100), ("N", 75, 30)])
+    dl = DecisionLayer()
+    out = feed(dl, b, usable=lambda te: not (40 <= te <= 50))
+    check("a rejected window inside the run: never 30 s of usable beats, no WCT alert",
+          "WCT" not in kinds(out), str(kinds(out)))
+
+    dl = DecisionLayer()
+    for i in range(6):
+        dl.on_shockable(i * 2.5, 0.9, organised())
+    out = feed(dl, stream([("PVC", 150, 100)], t0=20.0))
+    check("ShockableNet VF/VT episode open: no second (WCT) alert for the same event",
+          "WCT" not in kinds(out), str(kinds(out)))
+
+    print("\nPVC burden, PACs, bigeminy, trigeminy (report only)\n")
+    pattern = [("PVC" if i % 8 == 7 else "N", 75, 1) for i in range(75 * 70)]
+    dl = DecisionLayer()
+    out = feed(dl, stream(pattern))
+    pk = dl.report()["pvc_burden"]["peak_hour"]
+    check("70 min with 1 PVC in 8 (12.5%): peak hourly burden in the warning tier, no alert",
+          pk is not None and pk["tier"] == "warning" and out == [], str(pk))
+    check("... daily burden reported with its tier",
+          list(dl.report()["pvc_burden"]["daily"].values())[0]["tier"] == "warning")
+    dl = DecisionLayer()
+    feed(dl, stream([("PVC" if i % 8 == 7 else "N", 75, 1) for i in range(75 * 10)]))
+    check("10 minutes only: no hourly burden yet", dl.report()["pvc_burden"]["peak_hour"] is None)
+
+    def pat(units, unit):
+        return stream([("N", 75, 20)] + [(c, 75, 1) for _ in range(units) for c in unit]
+                      + [("N", 75, 20)])
+    dl = DecisionLayer()
+    feed(dl, pat(3, ["N", "PVC"]))
+    check("N PVC x3: one bigeminy episode", dl.report()["bigeminy_episodes"] == 1)
+    dl = DecisionLayer()
+    feed(dl, pat(2, ["N", "PVC"]))
+    check("N PVC x2: not yet bigeminy", dl.report()["bigeminy_episodes"] == 0)
+    dl = DecisionLayer()
+    feed(dl, pat(3, ["N", "N", "PVC"]))
+    check("N N PVC x3: one trigeminy episode, no bigeminy",
+          dl.report()["trigeminy_episodes"] == 1 and dl.report()["bigeminy_episodes"] == 0)
+    dl = DecisionLayer()
+    feed(dl, stream([("N", 75, 20), ("PVC", 75, 1), ("N", 75, 1), ("PVC", 75, 1),
+                     ("PAC", 75, 1), ("N", 75, 1), ("PVC", 75, 1), ("N", 75, 20)]))
+    check("a PAC breaks the alternation", dl.report()["bigeminy_episodes"] == 0)
+    dl = DecisionLayer()
+    feed(dl, stream([("N", 75, 20), ("PAC", 75, 3), ("N", 75, 20), ("PAC", 75, 2), ("N", 75, 20)]))
+    check("PACs are counted for the report", dl.report()["pac_count"] == 5)
+
+    print("\nECG saving around emergency alerts\n")
+    dl = DecisionLayer()
+    for i in range(6):
+        dl.on_shockable(100 + i * 2.5, 0.9, organised())
+    req = dl.take_recording_requests()
+    check("VF/VT alert asks for 30 s before to 30 s after",
+          len(req) == 1 and req[0].reason == "VF/VT"
+          and req[0].start == req[0].t - 30 and req[0].end == req[0].t + 30, str(req))
+    check("... handed over once", dl.take_recording_requests() == [])
+    dl = DecisionLayer()
+    dl.on_rate(50.0, rate(Finding("asystole", "critical", 7.0)), lead_off=False)
+    check("asystole alert asks for the ECG", [r.reason for r in dl.take_recording_requests()] == ["asystole"])
+    dl = DecisionLayer()
+    dl.on_rate(50.0, rate(Finding("pause", "warning", 4.0)), lead_off=False)
+    check("a pause (urgent, not emergency) does not", dl.take_recording_requests() == [])
+    dl = DecisionLayer()
+    feed(dl, stream([("N", 75, 30), ("PVC", 150, 100)]))
+    check("WCT alert asks for the ECG", [r.reason for r in dl.take_recording_requests()] == ["WCT"])
+
+    print("\nNaming VF or VT (off by default: shadow mode)\n")
+    check("naming is off in config", C.VFVT_NAMING_ENABLED is False)
+
+    def shock(dl, t0):
+        out = []
+        for i in range(6):
+            out += dl.on_shockable(t0 + i * 2.5, 0.9, organised())
+        return out
+
+    vt = stream([("N", 75, 10), ("PVC", 180, 60)])       # PVCs from 8 s to 27.7 s
+    dl = DecisionLayer()
+    feed(dl, vt, until=30.0)
+    out = shock(dl, 22.5)                                # alert at 30 s
+
+    check("PVCs in a row + ShockableNet: alert still 'VF/VT', guess 'VT' saved in shadow",
+          kinds(out) == ["VF/VT"] and dl.take_recording_requests()[0].shadow_name == "VT",
+          str([(a.kind, a.evidence.get("shadow_name")) for a in out]))
+    dl = DecisionLayer()
+    for te in (10.0, 20.0, 30.0):
+        dl.on_beats(te, [], usable=False)
+    out = shock(dl, 17.5)
+    check("beat model ran and saw no beats: shadow guess 'VF'",
+          out and out[0].evidence["shadow_name"] == "VF", str(out[0].evidence if out else None))
+    dl = DecisionLayer()
+    out = shock(dl, 100.0)
+    check("no beat-model output at all: shadow guess 'VF/VT'",
+          out and out[0].evidence["shadow_name"] == "VF/VT")
+    dl = DecisionLayer(DecisionConfig(vfvt_naming=True))
+    feed(dl, vt, until=30.0)
+    out = shock(dl, 22.5)
+    check("with naming on, the same case is alerted as 'VT'", kinds(out) == ["VT"], str(kinds(out)))
 
     print("\n" + ("ALL CHECKS PASSED" if ok else "FAILURES ABOVE"))
     return 0 if ok else 1

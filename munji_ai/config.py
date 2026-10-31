@@ -114,6 +114,55 @@ PVC_BURDEN_DAILY_SEC = 86400.0
 # is 33% and tells you nothing.
 PVC_BURDEN_MIN_BEATS = 200
 
+# ------------------------------------------------- ventricular rhythms from beats
+# Read off the beat model's labels by the decision layer (on_beats).
+#
+# VT, by definition. 2017 AHA/ACC/HRS ventricular arrhythmia guideline,
+# definitions table: VT is 3 or more consecutive complexes of ventricular
+# origin at more than 100 bpm (cycle length under 600 ms); sustained when it
+# lasts more than 30 s, nonsustained when it ends on its own before.
+#
+# Sustained VT alerts as emergent: in the 26,438-patient MCOT series above,
+# wide-complex tachycardia was among the potentially emergent events.
+VT_MIN_BEATS = 3
+VT_MIN_BPM = 100.0              # strictly above
+VT_SUSTAINED_SEC = 30.0
+
+# Sustained VT is read as "at least this share of the last 30 s of beats is
+# ventricular", not "every beat". Engineering, not clinical: the beat model
+# misses some PVCs, and one missed PVC splits a strict consecutive run into
+# short pieces that never reach 30 s, so a long VT never alerts.
+# eval/vt_run_simulation.py measured that effect; 0.80 tolerates about one
+# missed PVC in five.
+VT_SUSTAINED_PVC_FRACTION = 0.80
+
+# Bigeminy: a PVC alternating with a normal beat; trigeminy: every third beat a
+# PVC (StatPearls, "Premature Ventricular Contraction", NCBI Bookshelf). The
+# minimum of three repeated cycles is a detection convention used by
+# arrhythmia-analysis software (e.g. US patent 12268527: "at least three
+# consecutive pairs ... are required"), not a guideline value.
+ECTOPY_PATTERN_MIN_CYCLES = 3
+
+# Beat windows overlap (20 s every 10 s), so a beat arrives twice with its time
+# shifted by a few ms. Two beats closer than this are one. Engineering: under
+# the 200 ms refractory period QRS detectors use (Pan and Tompkins 1985),
+# over the jitter of a mask centre between windows.
+BEAT_DEDUP_SEC = 0.15
+
+# ECG saved around an emergency alert (VF/VT, asystole, sustained VT): the
+# decision layer asks, the app saves. Team decision to auto-save a short strip
+# around critical events so the doctor sees what triggered the alert.
+ECG_SAVE_BEFORE_SEC = 30.0
+ECG_SAVE_AFTER_SEC = 30.0
+
+# Naming a ShockableNet alert VF or VT from the beat labels: VT when the beat
+# model sees organised PVCs in a row, VF when it sees no beats at all. Off
+# until validated on new patients (ECG Fragment Database, CUDB, VFDB); while
+# off the alert stays "VF/VT" and the guess is saved with the recording only
+# (shadow mode), to be compared with the doctor's reading later.
+VFVT_NAMING_ENABLED = False
+VFVT_NAMING_LOOKBACK_SEC = 10.0  # engineering: the VT detector's 10 s input
+
 # --------------------------------------------------------------- window labels
 # Fraction of a window that must fall inside a rhythm episode for the window to
 # carry that label. Below this the window is ambiguous and is dropped rather
