@@ -14,10 +14,13 @@ SPLIT_DIR = DATA_ROOT / "splits"     # patient-level split manifests
 
 # ------------------------------------------------------------------ sampling
 # Training runs at 250 Hz: MITDB/AFDB/CUDB/VFDB/Icentia are natively 250 or
-# resample to it cleanly. The MAX30003 runs at 256 Hz and is resampled to 250
-# at inference, so train and deploy see identical signal characteristics.
+# resample to it cleanly. The patch firmware sets the MAX30003 to exactly
+# 250 samples/s (CNFG_GEN FMSTR=01, CNFG_ECG RATE=01), the same rate the app
+# and the .ecg file use, so inference needs no resampling.
+# If the firmware rate ever changes, DEVICE_FS changes with it and inference
+# must resample DEVICE_FS -> TARGET_FS.
 TARGET_FS = 250
-DEVICE_FS = 256
+DEVICE_FS = 250
 
 # -------------------------------------------------------------------- filters
 # Two independent paths, deliberately.
