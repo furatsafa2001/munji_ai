@@ -25,12 +25,15 @@ DEVICE_FS = 250
 # -------------------------------------------------------------------- filters
 # Two independent paths, deliberately.
 #
-# DIAGNOSTIC preserves the ST segment (0.05 Hz high-pass, per AHA/AAMI
-# diagnostic-bandwidth convention). Used for storage and future ST work.
-# Raising this cutoff destroys ST fidelity irreversibly — do not "clean up"
-# the trace by moving it to 0.5 Hz.
+# DIAGNOSTIC (0.05 Hz high-pass, per AHA/AAMI diagnostic-bandwidth
+# convention) applies to the public databases only. The patch cannot give
+# it: the MAX30003 applies its own 0.5 Hz high-pass and 40 Hz low-pass on
+# chip (CNFG_ECG DHPF=1, DLPF=01), so every signal from the device,
+# saved recordings included, is already in the monitoring band. ST
+# analysis is out of scope (single lead).
 #
-# MODEL is the standard monitoring band. Model inputs use this path.
+# MODEL is the standard monitoring band, the same band the chip applies.
+# Model inputs use this path.
 DIAGNOSTIC_BAND = (0.05, 40.0)
 MODEL_BAND = (0.5, 40.0)
 

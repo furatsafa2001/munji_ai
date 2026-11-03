@@ -29,16 +29,17 @@ way an ambulatory pipeline breaks.
 
 The OTHER class
 ---------------
-Not a rhythm. A bucket holding atrial flutter, supraventricular tachycardia,
-bradycardia and block — conditions with nothing in common except that they are
+Not a rhythm. A bucket holding supraventricular tachycardia, bradycardia,
+block and the rest: conditions with nothing in common except that they are
 neither sinus nor fibrillation. Training data for it is scarce (tens of
 windows against thousands), and it cannot be synthesised: interpolating
-between an atrial flutter and a bradycardia produces a trace that does not
-exist in nature.
+between an SVT and a bradycardia produces a trace that does not
+exist in nature. Atrial flutter is not in this class: it is labelled AF
+(data/windows.py), and the AF output reads AF/AFL.
 
 So the class is kept, but it does not drive selection and its score is
 reported separately. Keeping it means the model has somewhere to put a rhythm
-it does not recognise. Dropping it would force every flutter and every SVT
+it does not recognise. Dropping it would force every SVT and every block
 into NSR or AF, and calling a real arrhythmia "normal" is the worse failure.
 
 Shape: (batch, 1, 7500) -> (batch, 3)
