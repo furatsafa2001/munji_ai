@@ -1,4 +1,8 @@
-"""How good is the VT detector, without testing it on what it learnt from?
+"""EXPERIMENTAL, not part of the delivered pipeline. The VT detector was
+evaluated and not adopted: VF/VT is one ShockableNet alert, and slow VT is
+caught by the beat-count rule in the decision layer.
+
+How good is the VT detector, without testing it on what it learnt from?
 
     python -m munji_ai.eval.eval_vt_detector --info
     python -m munji_ai.eval.eval_vt_detector --part holter

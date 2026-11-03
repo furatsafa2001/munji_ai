@@ -1,4 +1,8 @@
-"""VTaC: ventricular tachycardia alarms from ICU monitors, read in small pieces.
+"""EXPERIMENTAL, not part of the delivered pipeline. The VT detector was
+evaluated and not adopted: VF/VT is one ShockableNet alert, and slow VT is
+caught by the beat-count rule in the decision layer.
+
+VTaC: ventricular tachycardia alarms from ICU monitors, read in small pieces.
 
     python -m munji_ai.data.vtac                         # true alarms (confirmed VT)
     python -m munji_ai.data.vtac --limit 700 --false 700 # plus 700 false alarms

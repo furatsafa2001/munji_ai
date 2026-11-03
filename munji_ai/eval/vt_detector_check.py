@@ -1,4 +1,8 @@
-"""Two checks before the VT detector can be used: naming, and daily false alerts.
+"""EXPERIMENTAL, not part of the delivered pipeline. The VT detector was
+evaluated and not adopted: VF/VT is one ShockableNet alert, and slow VT is
+caught by the beat-count rule in the decision layer.
+
+Two checks before the VT detector can be used: naming, and daily false alerts.
 
     python -m munji_ai.eval.vt_detector_check --model checkpoints/vt_detector/vt_detector.pt
 

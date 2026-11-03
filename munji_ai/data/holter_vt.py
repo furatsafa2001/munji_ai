@@ -1,4 +1,8 @@
-"""Holter-domain windows for the VT detector: VT, VF and everything else.
+"""EXPERIMENTAL, not part of the delivered pipeline. The VT detector was
+evaluated and not adopted: VF/VT is one ShockableNet alert, and slow VT is
+caught by the beat-count rule in the decision layer.
+
+Holter-domain windows for the VT detector: VT, VF and everything else.
 
     python -m munji_ai.data.holter_vt
 

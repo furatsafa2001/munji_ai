@@ -1,4 +1,8 @@
-"""VT detector: is this real ventricular tachycardia? Trained on VTaC alarms.
+"""EXPERIMENTAL, not part of the delivered pipeline. The VT detector was
+evaluated and not adopted: VF/VT is one ShockableNet alert, and slow VT is
+caught by the beat-count rule in the decision layer.
+
+VT detector: is this real ventricular tachycardia? Trained on VTaC alarms.
 
     python -m munji_ai.train.vt_detector --augment --out /content/drive/MyDrive/munji_vt
     python -m munji_ai.train.vt_detector --augment --init shockable --out ...
