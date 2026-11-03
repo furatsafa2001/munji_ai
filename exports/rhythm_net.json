@@ -1,0 +1,74 @@
+{
+  "model": "rhythm_net",
+  "file": "rhythm_net.tflite",
+  "exported": "2026-10-26",
+  "sha256": "3b5a2fb6c23283d88898feb6e67f6a512a49b897bd427a93fcf8c682d9932221",
+  "input": {
+    "shape": [
+      1,
+      7500
+    ],
+    "dtype": "float32",
+    "sample_rate_hz": 250,
+    "window_s": 30.0,
+    "stride_s": 15.0,
+    "leads": 1
+  },
+  "preprocessing": {
+    "resample_hz": 250,
+    "bandpass_hz": [
+      0.5,
+      40.0
+    ],
+    "bandpass": "Butterworth, order 4, zero-phase",
+    "notch_hz": 50.0,
+    "notch_q": 30.0,
+    "notch": "IIR notch, zero-phase",
+    "normalise": "(x - median(x)) / ((q75 - q25) / 1.349 + 1e-8), per window",
+    "note": "Training filtered whole recordings with zero-phase filters. The app must reproduce this on a rolling buffer; check it with raw-signal golden vectors before release."
+  },
+  "output": {
+    "order": [
+      "NSR",
+      "AF",
+      "OTHER"
+    ],
+    "shape": [
+      3
+    ],
+    "range": [
+      0,
+      1
+    ]
+  },
+  "decision": {
+    "positive_class": "AF",
+    "threshold": 0.6,
+    "confirmation_n_of_m": [
+      4,
+      6
+    ],
+    "meaning": "alert when n of the last m windows reach the threshold"
+  },
+  "training": {
+    "epoch": 24,
+    "augment": true,
+    "gamma": 2.0
+  },
+  "verification": {
+    "split": "val",
+    "windows": 2957,
+    "max_abs_diff": 1.2218952178955078e-06,
+    "mean_abs_diff": 7.285635916787214e-08,
+    "threshold_flips": 0,
+    "pytorch": {
+      "sensitivity": 0.924022346368715,
+      "specificity": 0.9907856450048497
+    },
+    "tflite": {
+      "sensitivity": 0.924022346368715,
+      "specificity": 0.9907856450048497
+    },
+    "passed": true
+  }
+}

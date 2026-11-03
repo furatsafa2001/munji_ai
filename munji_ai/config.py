@@ -14,20 +14,26 @@ SPLIT_DIR = DATA_ROOT / "splits"     # patient-level split manifests
 
 # ------------------------------------------------------------------ sampling
 # Training runs at 250 Hz: MITDB/AFDB/CUDB/VFDB/Icentia are natively 250 or
-# resample to it cleanly. The MAX30003 runs at 256 Hz and is resampled to 250
-# at inference, so train and deploy see identical signal characteristics.
+# resample to it cleanly. The patch firmware sets the MAX30003 to exactly
+# 250 samples/s (CNFG_GEN FMSTR=01, CNFG_ECG RATE=01), the same rate the app
+# and the .ecg file use, so inference needs no resampling.
+# If the firmware rate ever changes, DEVICE_FS changes with it and inference
+# must resample DEVICE_FS -> TARGET_FS.
 TARGET_FS = 250
-DEVICE_FS = 256
+DEVICE_FS = 250
 
 # -------------------------------------------------------------------- filters
 # Two independent paths, deliberately.
 #
-# DIAGNOSTIC preserves the ST segment (0.05 Hz high-pass, per AHA/AAMI
-# diagnostic-bandwidth convention). Used for storage and future ST work.
-# Raising this cutoff destroys ST fidelity irreversibly — do not "clean up"
-# the trace by moving it to 0.5 Hz.
+# DIAGNOSTIC (0.05 Hz high-pass, per AHA/AAMI diagnostic-bandwidth
+# convention) applies to the public databases only. The patch cannot give
+# it: the MAX30003 applies its own 0.5 Hz high-pass and 40 Hz low-pass on
+# chip (CNFG_ECG DHPF=1, DLPF=01), so every signal from the device,
+# saved recordings included, is already in the monitoring band. ST
+# analysis is out of scope (single lead).
 #
-# MODEL is the standard monitoring band. Model inputs use this path.
+# MODEL is the standard monitoring band, the same band the chip applies.
+# Model inputs use this path.
 DIAGNOSTIC_BAND = (0.05, 40.0)
 MODEL_BAND = (0.5, 40.0)
 
@@ -113,6 +119,55 @@ PVC_BURDEN_DAILY_SEC = 86400.0
 # Below this many beats the percentage is noise. Ten PVCs out of thirty beats
 # is 33% and tells you nothing.
 PVC_BURDEN_MIN_BEATS = 200
+
+# ------------------------------------------------- ventricular rhythms from beats
+# Read off the beat model's labels by the decision layer (on_beats).
+#
+# VT, by definition. 2017 AHA/ACC/HRS ventricular arrhythmia guideline,
+# definitions table: VT is 3 or more consecutive complexes of ventricular
+# origin at more than 100 bpm (cycle length under 600 ms); sustained when it
+# lasts more than 30 s, nonsustained when it ends on its own before.
+#
+# Sustained VT alerts as emergent: in the 26,438-patient MCOT series above,
+# wide-complex tachycardia was among the potentially emergent events.
+VT_MIN_BEATS = 3
+VT_MIN_BPM = 100.0              # strictly above
+VT_SUSTAINED_SEC = 30.0
+
+# Sustained VT is read as "at least this share of the last 30 s of beats is
+# ventricular", not "every beat". Engineering, not clinical: the beat model
+# misses some PVCs, and one missed PVC splits a strict consecutive run into
+# short pieces that never reach 30 s, so a long VT never alerts.
+# eval/vt_run_simulation.py measured that effect; 0.80 tolerates about one
+# missed PVC in five.
+VT_SUSTAINED_PVC_FRACTION = 0.80
+
+# Bigeminy: a PVC alternating with a normal beat; trigeminy: every third beat a
+# PVC (StatPearls, "Premature Ventricular Contraction", NCBI Bookshelf). The
+# minimum of three repeated cycles is a detection convention used by
+# arrhythmia-analysis software (e.g. US patent 12268527: "at least three
+# consecutive pairs ... are required"), not a guideline value.
+ECTOPY_PATTERN_MIN_CYCLES = 3
+
+# Beat windows overlap (20 s every 10 s), so a beat arrives twice with its time
+# shifted by a few ms. Two beats closer than this are one. Engineering: under
+# the 200 ms refractory period QRS detectors use (Pan and Tompkins 1985),
+# over the jitter of a mask centre between windows.
+BEAT_DEDUP_SEC = 0.15
+
+# ECG saved around an emergency alert (VF/VT, asystole, sustained VT): the
+# decision layer asks, the app saves. Team decision to auto-save a short strip
+# around critical events so the doctor sees what triggered the alert.
+ECG_SAVE_BEFORE_SEC = 30.0
+ECG_SAVE_AFTER_SEC = 30.0
+
+# Naming a ShockableNet alert VF or VT from the beat labels: VT when the beat
+# model sees organised PVCs in a row, VF when it sees no beats at all. Off
+# until validated on new patients (ECG Fragment Database, CUDB, VFDB); while
+# off the alert stays "VF/VT" and the guess is saved with the recording only
+# (shadow mode), to be compared with the doctor's reading later.
+VFVT_NAMING_ENABLED = False
+VFVT_NAMING_LOOKBACK_SEC = 10.0  # engineering: the VT detector's 10 s input
 
 # --------------------------------------------------------------- window labels
 # Fraction of a window that must fall inside a rhythm episode for the window to
@@ -247,24 +302,148 @@ NOISE_SNR_DB_RANGE = (-6.0, 20.0)
 AUGMENT_PROB = 0.5
 
 # ------------------------------------------------------------------ rule tiers
-# Engineering proposals. Clinical thresholds are not settled and any value
-# here should be treated as provisional.
-HR_BRADY = {"info": 59, "warning": 49, "critical": 39}   # HR at or below
-HR_TACHY = {"info": 101, "warning": 121, "critical": 151}  # HR at or above
+# Every clinical number here has a published source, written beside it with
+# its comparison. The measured rate is continuous, so "below 60" and "at or
+# below 59" are different rules; the second left 59-60 unclassified.
+#
+# HR_BRADY  rate strictly BELOW the value
+#   info      60  conventional definition of bradycardia
+#   warning   50  2018 ACC/AHA/HRS bradycardia guideline: sinus bradycardia
+#                 is a rate below 50 while awake
+#   critical  40  2018 ACC/AHA/HRS: sinus node dysfunction is diagnosed on
+#                 symptoms with a rate below 40; NEWS2 (Royal College of
+#                 Physicians 2017) gives 40 or less its most abnormal score
+#
+# HR_TACHY  info and warning strictly ABOVE; critical AT OR ABOVE
+#   info     100  conventional definition of tachycardia
+#   warning  110  NEWS2: 111-130 scores 2 (91-110 scores 1)
+#   critical 150  AHA adult tachyarrhythmia algorithm: rate typically >= 150
+#
+# These tiers grade findings for the doctor's report. Who is NOTIFIED is a
+# separate decision, below under "notification".
+HR_BRADY = {"info": 60, "warning": 50, "critical": 40}     # strictly below
+HR_TACHY = {"info": 100, "warning": 110, "critical": 150}  # see semantics above
+
+# A rate finding needs the rate held over this many consecutive beats.
+# PhysioNet/CinC Challenge 2015 alarm definitions
+# (Clifford et al., Physiol Meas 2016): extreme bradycardia, HR < 40 for 5
+# consecutive beats; extreme tachycardia, HR > 140 for 17 consecutive beats.
+# No source gives a count for the milder tiers, so each tier uses its family's
+# count. These counts replace N-of-M window confirmation for the rate rules.
+RATE_RUN_BEATS = {"brady": 5, "tachy": 17}
+# The rate of a run is 60 / the mean RR after dropping this fraction of the
+# longest and of the shortest intervals, the way bedside monitors average
+# heart rate (the 3 longest and 3 shortest of 16 RR dropped, the residual 10
+# averaged; EC13 requires monitors to disclose their averaging). One missed
+# beat or one pause cannot make or break a run; an irregular fast rhythm
+# (AF at 160) still counts; a burst shorter than half the run does not.
+RATE_RUN_TRIM = 3 / 16
+
+# Pause (warning): longest beat-to-beat gap strictly longer than this.
+# 2018 ACC/AHA/HRS: pauses longer than 3 s in sinus node dysfunction;
+# 2018 ESC syncope guidelines: a symptomatic pause longer than 3 s.
 PAUSE_WARNING_SEC = 3.0
-ASYSTOLE_CRITICAL_SEC = 4.0
+# Asystole (critical): gap strictly longer than this. 2018 ESC syncope
+# guidelines: an asymptomatic pause longer than 6 s is significant on its own.
+# (CinC 2015 used 4 s for ICU alarms; the clinical guideline is preferred.)
+ASYSTOLE_CRITICAL_SEC = 6.0
+# A gap is read as pause or asystole only if it is quiet: nothing inside it
+# reaches this, peak to valley. Monitors meeting EC13 / IEC 60601-2-27 must
+# detect QRS complexes from 0.5 to 5 mV, so a deflection of 0.5 mV inside a
+# "gap" is either a beat the detector missed or artifact: the gap is
+# unreadable, not empty. Asystole is the absence of electrical activity; sensor
+# noise and the P waves of ventricular standstill (about 0.1-0.25 mV) stay
+# below it. Measured need: NSRDB 16272, an hour of motion artifact up to 10 mV
+# read as repeated asystole when beats under it were missed.
+ABSENCE_MAX_PTP_MV = 0.5
+
+# Wide QRS at or above this. AHA adult tachyarrhythmia algorithm (QRS >= 0.12 s);
+# wide-complex tachycardia is defined as QRS >= 120 ms.
 NARROW_QRS_MS = 120
+# The fast narrow-complex label uses the same line as the critical tachy tier.
 FAST_NARROW_BPM = 150
+
+# A detected peak counts as a beat only if its QRS is larger than this, peak
+# to valley, in millivolts. ANSI/AAMI EC13: a heart-rate meter must not respond
+# to a QRS of 0.15 mV or less, so that P waves during ventricular standstill
+# are not counted (Drew et al., PLoS ONE 2014). It is also what lets the engine
+# see a real asystole: the R-peak detector's threshold is relative, so on a
+# quiet trace it always "finds" peaks in the noise.
+# The rate engine's input must therefore be in millivolts, never normalised.
+QRS_MIN_AMP_MV = 0.15
+# Amplitude is read over +/- this around each peak: a QRS up to 120 ms, the
+# upper limit of a normal complex (same 120 ms line as above).
+QRS_AMP_HALF_MS = 60
+# Width is searched over +/- this. It must be able to measure the widest
+# complexes reported clinically: 69% of VT exceeds 140 ms (Wellens 1978) and
+# LBBB-pattern VT exceeds 160 ms. The old 60 ms capped every reading at 124 ms.
+QRS_SEARCH_HALF_MS = 100
+# Half-width of the band around NARROW_QRS_MS where width is reported as
+# "uncertain" instead of narrow or wide. Set it from the measured error in
+# eval_qrs_width_qtdb (acceptance: IEC 60601-2-25, mean difference within
+# +/-10 ms, SD 10 ms against expert measurement). None until then: no band.
+QRS_UNCERTAIN_MS = None
+
+# ------------------------------------------------------------------ notification
+# Which findings reach the caregiver. Everything else goes to the report.
+#
+# Base: ambulatory cardiac telemetry practice (MCOT), the same class of device
+# as this patch. Physician-notification criteria of a commercial MCOT service
+# (Philips BioTel MCOT protocol, as published in J Cardiol Curr Res,
+# "Outpatient cardiac telemetry monitoring for early patient discharge"):
+# pause of 3 s or more; SVT or AF at 180 bpm or more for 30 s or more;
+# bradycardia at 30 bpm or less for 30 s or more; wide-complex tachycardia at
+# 150 bpm or more for 6 s or more. In a retrospective series of 26,438 MCOT
+# patients (cited in payer medical-policy reviews of MCOT) the potentially
+# emergent events were wide-complex tachycardia, pauses of 6 s or longer, and
+# sustained bradycardia below 30 bpm.
+#
+# Bradycardia below 40 held 30 s is also sent (team decision for elderly users
+# at home, checked against the literature): the ARIC study's alert criteria
+# for the Zio single-lead patch in older adults include "bradycardia < 40 bpm
+# sustained for > 30 seconds"; pacing guidelines treat an awake rate below 40
+# as significant even without clear symptoms (ACC/AHA; ESC 2008/2021). Caveat:
+# the guidelines say awake, and the patch cannot tell sleep from waking.
+# Tachycardia stays at the monitoring line, 180: MCOT (>= 180 for 30 s) and
+# ARIC (narrow QRS > 180 for 60 s). The AHA 150 line is a bedside rule for
+# whether a fast rate explains a patient's instability, not a monitoring alert
+# threshold, so 150-180 goes to the report.
+#
+#   sustained bradycardia  rate below 40, held 30 s          urgent    (ARIC)
+#   profound bradycardia   rate at or below 30, held 30 s    emergent  (MCOT)
+#   sustained tachycardia  rate at or above 180, held 30 s   urgent    (MCOT, ARIC)
+#   pause                  gap longer than PAUSE_WARNING_SEC     urgent
+#   asystole               gap longer than ASYSTOLE_CRITICAL_SEC emergent
+#   wide-complex rhythm    ventricular-beat detector, not here (ARIC: wide QRS
+#                          > 120 bpm for 30 s; MCOT: >= 150 for 6 s)
+NOTIFY_SUSTAIN_SEC = 30.0
+NOTIFY_BRADY_URGENT_BPM = 40       # strictly below, held NOTIFY_SUSTAIN_SEC
+NOTIFY_BRADY_EMERGENT_BPM = 30     # at or below, held NOTIFY_SUSTAIN_SEC
+NOTIFY_TACHY_URGENT_BPM = 180      # at or above, held NOTIFY_SUSTAIN_SEC
+
+# The "fast narrow" (SVT) label rests on the QRS width estimate, which failed
+# against hand-measured QRS on the QT Database: mean -50 ms, SD 35 ms against
+# IEC 60601-2-25 limits of +/-10 ms and 10 ms, correlation 0.25. Off until a
+# width source passes. A fast rhythm is still reported and notified by rate.
+FAST_NARROW_LABEL = False
+
+# Windows the rate engine runs on, derived from the definitions above, not
+# chosen. 40 s holds a 30 s sustained run whole (40 - 2.5 > 30), and so also a
+# gap longer than 6 s and a 5-beat run at any rate a heart can hold. Latency is
+# the definition itself (30 s, or the gap) plus at most one stride.
+RULES_WINDOW_SEC = 40.0
+RULES_STRIDE_SEC = 2.5
 
 # Confirmation windows — N of M consecutive positives before an alert fires.
 # A single window must never trigger a phone call.
+# The rate rules carry their own persistence (beats held, or gap length), so
+# one window with a finding is already confirmed: (1, 1). "asystole" covers
+# the whole absence family (pause and asystole) in the decision layer.
 CONFIRMATION = {
-    "vf": (2, 3),
-    "asystole": (2, 3),
-    "wide_complex": (3, 4),
-    "extreme_brady": (3, 4),
-    "extreme_tachy": (3, 4),
-    "pause": (2, 3),
-    "af": (2, 3),
-    "fast_narrow": (3, 4),
+    "vf": (4, 6),
+    "asystole": (1, 1),
+    "extreme_brady": (1, 1),
+    "extreme_tachy": (1, 1),
+    "af": (4, 6),
+    "fast_narrow": (1, 1),
 }

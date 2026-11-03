@@ -51,7 +51,8 @@ RHYTHM_MAP = {
     "(AFIB": "AF",
     "(AFL": "AFL",
     "(SVTA": "SVT", "(SBR": "BRADY",
-    "(VT": "VT", "(VFL": "VF", "(VFIB": "VF",
+    # VFDB documents fibrillation as "(VF" or "(VFIB"; both mean VF.
+    "(VT": "VT", "(VF": "VF", "(VFL": "VF", "(VFIB": "VF",
     "(B": "BIGEMINY", "(T": "TRIGEMINY",
     "(P": "PACED", "(AB": "OTHER", "(IVR": "OTHER", "(NOD": "OTHER",
     # Generic marker for a set that labels "some other rhythm" without naming
@@ -62,6 +63,30 @@ RHYTHM_MAP = {
     # own span; windows dominated by them are dropped downstream.
     "(NOISE": "NOISE", "(UNKNOWN": "UNKNOWN",
 }
+
+# Rhythm tokens found in the downloaded databases that are deliberately left to
+# the OTHER fallback. Every one is non-shockable and outside the rhythm
+# classes, so OTHER is correct for both models. They are named so that
+# tests/test_rhythm_tokens.py can tell a deliberate OTHER from a missing entry,
+# which is how "(VF" went unnoticed.
+OTHER_TOKENS = {
+    "(ASYS",    # asystole (vfdb)
+    "(BI",      # first-degree heart block (vfdb)
+    "(BII",     # second-degree heart block (mitdb)
+    "(HGEA",    # high-grade ventricular ectopic activity (vfdb)
+    "(VER",     # ventricular escape rhythm (vfdb)
+    "(PM",      # pacemaker rhythm (vfdb)
+    "(PREX",    # pre-excitation (mitdb)
+    "(J",       # junctional rhythm (afdb)
+    "(AF",      # cudb; meaning not documented there, non-shockable either way
+    "(SAB",     # sino-atrial block (edb)
+    "(B3",      # edb, once; meaning not documented, non-shockable either way
+}
+
+# ST-segment and T-wave change markers (EDB): (ST0+, (ST1-, (T0+, (T1--,
+# lower-case variants. They describe repolarisation, not rhythm, and must not
+# cut a rhythm interval. "(T" alone is trigeminy and is not matched.
+NON_RHYTHM = re.compile(r"^\((?:ST|st|T|t)[01]")
 
 
 def _patient_id(ds: Dataset, record: str) -> str:
@@ -210,7 +235,10 @@ def load_record(
                 # (NOISE is kept, not filtered. Intervals run until the
                 # next marker, so dropping it here would make the preceding
                 # rhythm extend across unreadable signal and mislabel it.
-                rk = np.array([a.startswith("(") for a in aux])
+                # ST/T change markers start with "(" too but are not rhythm
+                # changes; counting them would cut the real interval short.
+                rk = np.array([a.startswith("(") and not NON_RHYTHM.match(a)
+                               for a in aux])
                 if rk.any():
                     rhy_s, rhy_y = idx[rk], aux[rk]
 

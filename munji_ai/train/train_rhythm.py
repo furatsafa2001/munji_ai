@@ -35,7 +35,7 @@ from torch.utils.data import DataLoader, TensorDataset
 
 from ..config import CACHE_DIR, CONFIRMATION, RHYTHM_CLASSES
 from ..data.windows import load_cache
-from ..eval.metrics import macro_f1, report
+from ..eval.metrics import macro_f1, per_class, report
 from ..models.rhythm_net import (SCORED_CLASSES, RhythmLoss, build,
                                  class_weights)
 
@@ -171,6 +171,23 @@ def evaluate(model, loader, device) -> tuple[np.ndarray, np.ndarray]:
     return pred, P[:, RHYTHM_CLASSES.index(POSITIVE)]
 
 
+def scored_f1(y_true, y_pred) -> tuple[float, float]:
+    """(macro F1 over SCORED_CLASSES, OTHER F1), every class scored against
+    every prediction.
+
+    macro_f1 with a subset of labels builds its confusion matrix over that
+    subset only, so windows predicted OTHER vanish from NSR's and AF's counts
+    and a model can look perfect by sending its hard windows to OTHER.
+    """
+    pc = per_class(y_true, y_pred, list(RHYTHM_CLASSES))
+
+    def f(c):
+        v = pc[c]["f1"]
+        return 0.0 if np.isnan(v) else float(v)
+
+    return float(np.mean([f(c) for c in SCORED_CLASSES])), f("OTHER")
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--cache", type=Path, default=CACHE_DIR)
@@ -180,6 +197,10 @@ def main(argv=None) -> int:
     ap.add_argument("--lr", type=float, default=2e-3)
     ap.add_argument("--patience", type=int, default=8)
     ap.add_argument("--penalty", type=float, default=1.3)
+    ap.add_argument("--gamma", type=float, default=2.0,
+                    help="focal loss gamma; 0 = plain weighted cross-entropy")
+    ap.add_argument("--augment", action="store_true",
+                    help="NSTDB noise, jitter and cutout on training batches")
     ap.add_argument("--device", default="auto")
     ap.add_argument("--seed", type=int, default=0)
     a = ap.parse_args(argv)
@@ -221,12 +242,20 @@ def main(argv=None) -> int:
 
     model = build().to(device)
     w = class_weights(tr["y"])
+    aug = None
+    if a.augment:
+        from ..data.train_augment import (BANK_NAME, TrainAugment,
+                                          load_noise_bank, split_bank)
+        bank_train, _ = split_bank(load_noise_bank(a.cache / BANK_NAME))
+        aug = TrainAugment(bank_train, device, seed=a.seed)
+        print("augment     on (noise, jitter, cutout), training batches only")
     print(f"\nparameters  {model.n_params():,}")
     print(f"weights     {dict(zip(RHYTHM_CLASSES, [round(v, 2) for v in w.tolist()]))}"
           f"  (capped)")
     print(f"selected on macro F1 over {SCORED_CLASSES}\n")
 
-    crit = RhythmLoss(w.to(device), af_miss_penalty=a.penalty).to(device)
+    crit = RhythmLoss(w.to(device), af_miss_penalty=a.penalty,
+                      gamma=a.gamma).to(device)
     opt = torch.optim.AdamW(model.parameters(), lr=a.lr, weight_decay=1e-4)
     sched = torch.optim.lr_scheduler.OneCycleLR(
         opt, max_lr=a.lr, epochs=a.epochs, steps_per_epoch=len(train_loader))
@@ -240,6 +269,8 @@ def main(argv=None) -> int:
         total, t0 = 0.0, time.time()
         for xb, yb in train_loader:
             xb, yb = xb.to(device), yb.to(device)
+            if aug is not None:
+                xb = aug(xb)
             opt.zero_grad()
             loss = crit(model(xb), yb)
             loss.backward()
@@ -249,8 +280,7 @@ def main(argv=None) -> int:
             total += loss.item()
 
         pred, _ = evaluate(model, val_loader, device)
-        f1 = macro_f1(y_va_str, pred, list(SCORED_CLASSES))
-        other_f1 = macro_f1(y_va_str, pred, ["OTHER"])
+        f1, other_f1 = scored_f1(y_va_str, pred)
         s = binary_scores(y_va_str, pred)
 
         mark = ""
@@ -277,7 +307,9 @@ def main(argv=None) -> int:
     a.out.mkdir(parents=True, exist_ok=True)
     ckpt = a.out / "rhythm_net.pt"
     torch.save({"state_dict": best_state, "classes": list(RHYTHM_CLASSES),
-                "val_macro_f1_scored": best_f1, "epoch": best_epoch}, ckpt)
+                "val_macro_f1_scored": best_f1, "epoch": best_epoch,
+                "gamma": a.gamma, "augment": a.augment,
+                "confirmation": tuple(CONFIRMATION["af"])}, ckpt)
 
     pred, p_af = evaluate(model, val_loader, device)
     s = binary_scores(y_va_str, pred)

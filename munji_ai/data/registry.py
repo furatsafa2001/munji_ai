@@ -172,10 +172,10 @@ REGISTRY: dict[str, Dataset] = {
     # (51 of 90 records) and is the chest position CM5 is named after.
     #
     # Most annotations in this set mark ST-segment and T-wave episodes, not
-    # rhythms: (ST0+, (ST1-, (T0+, (T1+ and their closers. They are not in
-    # RHYTHM_MAP, so the loader treats each as an unrecognised rhythm and
-    # drops the windows it dominates. That loses coverage but mislabels
-    # nothing - a dropped window is dropped, not called sinus.
+    # rhythms: (ST0+, (ST1-, (T0+, (T1+ and their closers. The loader skips
+    # them (loader.NON_RHYTHM) when building rhythm intervals. Before that
+    # fix they were read as rhythm changes and fell back to OTHER, which cut
+    # real intervals short, VT runs included.
     #
     # Listing them as ambiguous in config would keep more of each record, but
     # AMBIGUOUS_RHYTHMS feeds the config hash, so it would invalidate every

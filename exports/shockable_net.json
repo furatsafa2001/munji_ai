@@ -1,0 +1,72 @@
+{
+  "model": "shockable_net",
+  "file": "shockable_net.tflite",
+  "exported": "2026-10-26",
+  "sha256": "3a5de31a29ed713fd61b0e9390e20d7cef37fdd7af11d305dd24d4c0b23a6799",
+  "input": {
+    "shape": [
+      1,
+      1250
+    ],
+    "dtype": "float32",
+    "sample_rate_hz": 250,
+    "window_s": 5.0,
+    "stride_s": 2.5,
+    "leads": 1
+  },
+  "preprocessing": {
+    "resample_hz": 250,
+    "bandpass_hz": [
+      0.5,
+      40.0
+    ],
+    "bandpass": "Butterworth, order 4, zero-phase",
+    "notch_hz": 50.0,
+    "notch_q": 30.0,
+    "notch": "IIR notch, zero-phase",
+    "normalise": "(x - median(x)) / ((q75 - q25) / 1.349 + 1e-8), per window",
+    "note": "Training filtered whole recordings with zero-phase filters. The app must reproduce this on a rolling buffer; check it with raw-signal golden vectors before release."
+  },
+  "output": {
+    "order": [
+      "p_shockable"
+    ],
+    "shape": [
+      1
+    ],
+    "range": [
+      0,
+      1
+    ]
+  },
+  "decision": {
+    "positive_class": "shockable",
+    "threshold": 0.6,
+    "confirmation_n_of_m": [
+      4,
+      6
+    ],
+    "meaning": "alert when n of the last m windows reach the threshold"
+  },
+  "training": {
+    "epoch": 8,
+    "augment": true,
+    "extra_negatives": "data/cache/shockable_extra_neg_v2.npz"
+  },
+  "verification": {
+    "split": "val",
+    "windows": 3482,
+    "max_abs_diff": 2.980232238769531e-07,
+    "mean_abs_diff": 1.377538971780723e-08,
+    "threshold_flips": 0,
+    "pytorch": {
+      "sensitivity": 0.8452914798206278,
+      "specificity": 0.9746376811594203
+    },
+    "tflite": {
+      "sensitivity": 0.8452914798206278,
+      "specificity": 0.9746376811594203
+    },
+    "passed": true
+  }
+}
