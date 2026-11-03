@@ -306,8 +306,41 @@ def alert_diagnosis(sig: np.ndarray, beats: np.ndarray, t_end: float, kind: str,
             "qrs_mv": qrs, "missed_mv": missed_mv}
 
 
+class Gate:
+    """P(usable) of the trained quality gate, once per 5 s block of a record.
+
+    Each block is normalised on its own, as the gate was trained
+    (windows.extract_quality). A rule window is usable when the mean P(usable)
+    of the blocks inside it reaches GATE_MIN_P["rhythm"] (GATE_COMBINER, mean).
+    """
+
+    def __init__(self, ckpt: Path):
+        import torch
+
+        from ..models.quality_gate import build
+        blob = torch.load(ckpt, map_location="cpu", weights_only=False)
+        self.model = build()
+        self.model.load_state_dict(blob["state_dict"])
+        self.model.eval()
+        self.torch = torch
+        self.block = C.window_samples("quality")
+        self.usable = C.QUALITY_CLASSES.index("usable")
+
+    def blocks(self, sig: np.ndarray) -> np.ndarray:
+        from ..data.preprocess import normalize
+        n = len(sig) // self.block
+        X = np.stack([normalize(sig[i * self.block:(i + 1) * self.block]) for i in range(n)]
+                     ).astype(np.float32) if n else np.zeros((0, self.block), np.float32)
+        out = []
+        with self.torch.no_grad():
+            for i in range(0, n, 512):
+                p = self.torch.softmax(self.model(self.torch.from_numpy(X[i:i + 512])), -1)
+                out.append(p[:, self.usable].numpy())
+        return np.concatenate(out) if out else np.zeros(0)
+
+
 def evaluate_record(sig: np.ndarray, beats: np.ndarray, missing: np.ndarray,
-                    acc: dict, record: str = "") -> None:
+                    acc: dict, record: str = "", p_block=None) -> None:
     win = int(C.RULES_WINDOW_SEC * FS)
     step = int(C.RULES_STRIDE_SEC * FS)
     cum = np.concatenate([[0], np.cumsum(missing)])
@@ -323,6 +356,13 @@ def evaluate_record(sig: np.ndarray, beats: np.ndarray, missing: np.ndarray,
             dl_ref.on_rate(t, empty, usable=True, lead_off=None, complete=False)
             continue
         acc["windows_used"] += 1
+        usable = True
+        if p_block is not None:
+            blk = C.window_samples("quality")
+            b0, b1 = start // blk, (start + win) // blk
+            seg = p_block[b0:b1]
+            usable = bool(seg.size and seg.mean() >= C.GATE_MIN_P["rhythm"])
+            acc["gate_rejected"] += int(not usable)
         eng = analyse(sig[start:start + win])
         ref = reference_report(beats, start, start + win)
 
@@ -335,7 +375,7 @@ def evaluate_record(sig: np.ndarray, beats: np.ndarray, missing: np.ndarray,
         for fam in RATE_FAMILIES:
             acc[f"win_{fam}"][(fam in wr, fam in we)] += 1
 
-        for a in dl_eng.on_rate(t, eng, usable=True, lead_off=None):
+        for a in dl_eng.on_rate(t, eng, usable=usable, lead_off=None):
             if a.severity != "info":
                 eng_alerts.append((t, FAMILY_OF[a.kind]))
                 eng_alerts_sev.append((t, FAMILY_OF[a.kind], a.severity))
@@ -379,12 +419,23 @@ def main():
                     help="skip stretches with no annotated beat for longer than this "
                          "(NSRDB subjects are screened free of significant arrhythmia; "
                          "0 = off, for corpora with real long pauses)")
+    ap.add_argument("--gate-ckpt", type=Path, default=None,
+                    help="checkpoints/quality_gate.pt: run the engine behind the real quality gate "
+                         "(the reference stays ungated)")
     ap.add_argument("--list-alerts", type=int, default=20,
                     help="print the first N alerts the engine sent, with what "
                          "happened to the annotated beats in each")
     ap.add_argument("--list-gaps", type=int, default=10,
                     help="print the N longest annotated gaps with their signal")
     a = ap.parse_args()
+    gate = None
+    if a.gate_ckpt is not None:
+        if not a.gate_ckpt.exists():
+            print(f"no quality gate at {a.gate_ckpt}")
+            return 1
+        gate = Gate(a.gate_ckpt)
+        print(f"quality gate {a.gate_ckpt}: a window is usable at mean P(usable) >= "
+              f"{C.GATE_MIN_P['rhythm']} (engine only; the reference is never gated)")
 
     use = set(a.splits) | ({"test"} if a.allow_test else set())
     manifest = S.load(a.splits_file)
@@ -421,7 +472,8 @@ def main():
             acc["dropout_len"].extend(drop_len)
             acc["hours_dropout"] += float((drop & ~missing).sum()) / FS / 3600.0
             acc["hours_unannotated"] += float((unann & ~missing & ~drop).sum()) / FS / 3600.0
-            evaluate_record(rec.signal, beats, missing | drop | unann, acc, name)
+            p_block = gate.blocks(rec.signal) if gate is not None else None
+            evaluate_record(rec.signal, beats, missing | drop | unann, acc, name, p_block)
             print(f"  {ds} {i + 1}/{len(names)}  {name}  {span}  "
                   f"{time.time() - t0:.0f} s", flush=True)
 
@@ -438,6 +490,10 @@ def main():
                  f" of 6-15 s, {int((dl_ > 15).sum())} longer" if dl_.size else ""))
         print(f"           {acc['hours_unannotated']:.2f} h with no annotated beat for over "
               f"{a.unannotated_sec:g} s")
+        if gate is not None:
+            print(f"  quality gate rejected {acc['gate_rejected'] / max(acc['windows_used'], 1):.1%} "
+                  f"of analysed windows (rate findings, and absence with lead status unknown, are "
+                  f"not sent from them)")
         if acc["hr_n"]:
             print(f"  heart rate within EC13 tolerance   {acc['hr_ok'] / acc['hr_n']:.3f}"
                   f"  ({acc['hr_n']:,} windows)")
@@ -535,7 +591,9 @@ def main():
                     print(f"    {x['record']:<10}{f'{hh:02d}:{mm:02d}:{ss:02d}':>10}"
                           f"{x['gap']:>8.1f}{x['ptp']:>9.2f}{x['qrs_before']:>12.2f}"
                           f"{x['engine_beats']:>14}")
-    print("\nNo quality gate and no lead status here: false alerts are an upper bound.")
+    print("\n" + ("Behind the real quality gate; no lead status (absence falls back to the gate)."
+                  if gate is not None else
+                  "No quality gate and no lead status here: false alerts are an upper bound."))
 
 
 if __name__ == "__main__":
