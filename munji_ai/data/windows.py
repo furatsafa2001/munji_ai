@@ -14,9 +14,10 @@ Caches are kept separate rather than merged: window lengths differ, label
 shapes differ, and merging would force loading 40 GB to train a gate that
 needs 2 GB.
 
-Every cache records the config hash it was built under. Change a filter cutoff
-or a sampling rate and the loader refuses stale caches instead of silently
-training on mismatched data.
+Every cache records the config hash it was built under: the hash of the config
+values its own stage reads. Change a filter cutoff or a sampling rate and the
+loader refuses stale caches instead of silently training on mismatched data.
+A setting only one stage reads invalidates that stage's cache and no other.
 """
 
 from __future__ import annotations
@@ -36,9 +37,20 @@ from .registry import get
 # --------------------------------------------------------------------- hashing
 
 
-def config_hash() -> str:
-    """Fingerprint of every config value a cache depends on."""
-    payload = json.dumps({
+# Config values only extract_beat reads. They are in the beat cache's
+# fingerprint and no other, so changing them invalidates the beat cache alone.
+BEAT_ONLY_KEYS = ("keep_all_ectopic", "max_ectopic")
+
+
+def config_hash(stage: str | None = None) -> str:
+    """Fingerprint of the config values a stage's cache depends on.
+
+    With a stage other than "beat", the beat-only values are left out, so a
+    beat-only setting does not invalidate the quality, rhythm or shockable
+    caches. Without a stage, every value is included: the single fingerprint
+    every cache carried before fingerprints were split by stage.
+    """
+    fields = {
         "fs": C.TARGET_FS,
         "model_band": C.MODEL_BAND,
         "mains": C.MAINS_HZ,
@@ -57,7 +69,11 @@ def config_hash() -> str:
         "quality_classes": sorted(C.QUALITY_CLASSES),
         "records_per_patient": C.MAX_RECORDS_PER_PATIENT,
         "quality_bands": augment.QUALITY_BANDS,
-    }, sort_keys=True)
+    }
+    if stage is not None and stage != "beat":
+        for key in BEAT_ONLY_KEYS:
+            del fields[key]
+    payload = json.dumps(fields, sort_keys=True)
     return hashlib.sha256(payload.encode()).hexdigest()[:12]
 
 
@@ -410,7 +426,7 @@ def build_stage(stage: str, manifest: dict, out_dir: Path | None = None,
             path, X=Xa, y=Ya,
             dataset=np.asarray(meta_ds), patient=np.asarray(meta_pat),
             record=np.asarray(meta_rec), offset=np.asarray(meta_off, dtype=np.int64),
-            cfg_hash=np.asarray(config_hash()), stage=np.asarray(stage),
+            cfg_hash=np.asarray(config_hash(stage)), stage=np.asarray(stage),
         )
         written[split] = path
         if verbose:
@@ -428,9 +444,12 @@ def load_cache(stage: str, split: str, cache_dir: Path | None = None,
     if not p.exists():
         raise FileNotFoundError(f"{p} missing — run build_stage({stage!r}) first")
     d = np.load(p, allow_pickle=False)
-    if check_hash and str(d["cfg_hash"]) != config_hash():
+    stored = str(d["cfg_hash"])
+    # The stage's own fingerprint, or the all-values one caches built before
+    # the split carry: matching every value means matching the stage's too.
+    if check_hash and stored not in (config_hash(stage), config_hash()):
         raise RuntimeError(
-            f"{p.name} was built under config {str(d['cfg_hash'])}, current is "
-            f"{config_hash()}. Rebuild the cache — preprocessing changed."
+            f"{p.name} was built under config {stored}, current is "
+            f"{config_hash(stage)}. Rebuild the cache — preprocessing changed."
         )
     return {k: d[k] for k in d.files}
