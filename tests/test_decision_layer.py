@@ -269,6 +269,59 @@ def main() -> int:
     feed(dl, stream([("N", 75, 30), ("PVC", 90, 5), ("N", 75, 30)]))
     check("5 PVCs at 90 bpm is not NSVT (rate must be above 100)", dl.report()["nsvt"] == 0)
 
+    print("\nCouplets and triplets (report only)\n")
+
+    def salvo(pvcs, bpm=150, before=("N", 75, 30), after=("N", 75, 30)):
+        dl = DecisionLayer()
+        out = feed(dl, stream([before, ("PVC", bpm, pvcs), after]))
+        return dl, dl.report(), out
+
+    dl, r, out = salvo(2)
+    check("N PVC PVC N: one couplet, no triplet, no NSVT, no alert",
+          (r["couplets"], r["triplets"], r["nsvt"], out) == (1, 0, 0, []),
+          str((r["couplets"], r["triplets"], r["nsvt"])))
+    t0, t1, bpm = r["couplet_runs"][0]
+    check("... with its time and rate for the report", abs(bpm - 150) < 1e-6 and t1 > t0,
+          f"{t0:.2f}-{t1:.2f} s, {bpm:.0f} bpm")
+    dl, r, out = salvo(3)
+    check("3 PVCs at 150 bpm: one triplet, and an NSVT too (counted as both)",
+          (r["couplets"], r["triplets"], r["nsvt"]) == (0, 1, 1))
+    dl, r, out = salvo(3, bpm=90)
+    check("3 PVCs at 90 bpm: still a triplet (no rate condition), not NSVT",
+          (r["triplets"], r["nsvt"]) == (1, 0))
+    dl, r, out = salvo(1)
+    check("a single PVC is neither", (r["couplets"], r["triplets"]) == (0, 0))
+    dl, r, out = salvo(4)
+    check("4 PVCs in a row are neither (an NSVT at 150 bpm)",
+          (r["couplets"], r["triplets"], r["nsvt"]) == (0, 0, 1))
+    dl = DecisionLayer()
+    feed(dl, stream([("N", 75, 20), ("PVC", 150, 2), ("N", 75, 10),
+                     ("PVC", 150, 2), ("N", 75, 10), ("PVC", 150, 3), ("N", 75, 20)]))
+    r = dl.report()
+    check("two couplets and a triplet in one stretch are counted apart",
+          (r["couplets"], r["triplets"]) == (2, 1), str((r["couplets"], r["triplets"])))
+    dl = DecisionLayer()
+    feed(dl, stream([("N", 75, 20), ("PAC", 75, 1), ("PVC", 150, 2), ("PAC", 75, 1),
+                     ("N", 75, 20)]))
+    check("PACs on both sides bound a couplet like normal beats",
+          dl.report()["couplets"] == 1)
+
+    beats = [(1.0, "N"), (1.8, "N"), (2.6, "N"), (3.0, "PVC"), (3.4, "PVC")]
+    dl = DecisionLayer()
+    dl.on_beats(10.0, beats)
+    dl.on_beats(20.0, [], usable=False)
+    dl.on_beats(30.0, [(21.0, "N"), (21.8, "N")])
+    check("a couplet cut by a rejected window is not counted (it may be longer)",
+          dl.report()["couplets"] == 0)
+    dl = DecisionLayer()
+    dl.on_beats(10.0, [(1.0, "PVC"), (1.4, "PVC"), (2.2, "N"), (3.0, "N")])
+    check("a couplet at the start of coverage is not counted (what came before is unknown)",
+          dl.report()["couplets"] == 0)
+    dl = DecisionLayer()
+    dl.on_beats(10.0, [(1.0, "N"), (2.0, "PVC"), (2.4, "PVC"), (3.2, "N")])
+    check("... the same couplet with a normal beat before it is counted",
+          dl.report()["couplets"] == 1)
+
     print("\nSustained VT -> WCT alert\n")
     dl = DecisionLayer()
     out = feed(dl, stream([("N", 75, 30), ("PVC", 150, 100), ("N", 75, 30)]))

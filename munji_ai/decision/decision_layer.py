@@ -106,6 +106,11 @@ Beats (BeatSegmenter, every beat window)
     NSVT, report only: 3 or more consecutive PVCs above 100 bpm that end
     within 30 s (2017 AHA/ACC/HRS definition).
 
+    Couplets (2 consecutive PVCs) and triplets (3), report only, at any rate
+    (StatPearls). Counted only with a usable non-PVC beat on both sides; a
+    run cut by a rejected window is not counted, because it may have been
+    longer. A triplet above 100 bpm is also an NSVT and is counted as both.
+
     Sustained VT, alert "WCT" (possible VT), emergent (critical): over the
     last 30 s of usable beats, at least 80% are PVCs and the rate is above
     100. Emergent because sustained VT is: in a series of 26,438 MCOT
@@ -269,6 +274,9 @@ class DecisionLayer:
         self.daily_beats: dict = {}           # day index -> [beats, pvcs]
         self.peak_hour_burden = None          # (t, burden, beats)
         self._run: list = []                  # times of the current PVC run
+        self._run_bounded = False             # a usable non-PVC beat came right before it
+        self._prev_beat = None                # class of the last usable beat, None after a gap
+        self.salvos = {k: [] for k in C.PVC_SALVO_BEATS}   # name -> [(start, end, bpm)]
         self.nsvt: list = []                  # (start, end, beats, bpm), under 30 s
         self.long_runs: list = []             # consecutive PVC runs of 30 s or more
         self._since_v = 0                     # normal beats since the last PVC
@@ -427,17 +435,28 @@ class DecisionLayer:
         day[0] += 1
         day[1] += int(c == "PVC")
         if c == "PVC":
+            if not self._run:
+                self._run_bounded = self._prev_beat is not None
             self._run.append(bt)
         else:
-            self._close_run()
+            self._close_run(ended_by_beat=True)
+        self._prev_beat = c
         self._pattern_step(c)
 
-    def _close_run(self) -> None:
+    def _close_run(self, ended_by_beat: bool = False) -> None:
+        """End the current PVC run. ended_by_beat: a usable non-PVC beat ended
+        it, not a gap."""
         run, self._run = self._run, []
-        if len(run) < C.VT_MIN_BEATS:
+        if not run:
             return
         dur = run[-1] - run[0]
         bpm = 60.0 * (len(run) - 1) / dur if dur > 0 else float("inf")
+        if ended_by_beat and self._run_bounded:
+            for name, n in C.PVC_SALVO_BEATS.items():
+                if len(run) == n:
+                    self.salvos[name].append((run[0], run[-1], bpm))
+        if len(run) < C.VT_MIN_BEATS:
+            return
         if bpm <= C.VT_MIN_BPM:
             return
         (self.nsvt if dur < C.VT_SUSTAINED_SEC else self.long_runs).append(
@@ -467,6 +486,7 @@ class DecisionLayer:
     def _break_beats(self) -> None:
         """A gap: close what was seen, start runs and patterns afresh."""
         self._close_run()
+        self._prev_beat = None
         self._since_v = 0
         self._cycles = {k: 0 for k in self._cycles}
         self._coverage_start = None
@@ -547,6 +567,10 @@ class DecisionLayer:
                 "beats": dict(self.beat_counts),
                 "pac_count": self.beat_counts["PAC"],
                 "pvc_burden": self._burden_report(),
+                "couplets": len(self.salvos["couplet"]),
+                "couplet_runs": list(self.salvos["couplet"]),
+                "triplets": len(self.salvos["triplet"]),
+                "triplet_runs": list(self.salvos["triplet"]),
                 "nsvt": len(self.nsvt),
                 "nsvt_runs": list(self.nsvt),
                 "long_vt_runs": list(self.long_runs),
