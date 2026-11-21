@@ -149,6 +149,14 @@ VT_SUSTAINED_PVC_FRACTION = 0.80
 # consecutive pairs ... are required"), not a guideline value.
 ECTOPY_PATTERN_MIN_CYCLES = 3
 
+# Couplet: two consecutive PVCs; triplet: three (StatPearls, "Premature
+# Ventricular Contraction": "Two consecutive PVCs are termed doublets while
+# three consecutive PVCs are named triplets"). No rate condition. Counted only
+# when a usable non-PVC beat is seen on both sides: a run cut by a rejected
+# window could be longer, so its length is not guessed. A triplet above
+# VT_MIN_BPM is also an NSVT (2017 AHA/ACC/HRS) and is counted as both.
+PVC_SALVO_BEATS = {"couplet": 2, "triplet": 3}
+
 # Beat windows overlap (20 s every 10 s), so a beat arrives twice with its time
 # shifted by a few ms. Two beats closer than this are one. Engineering: under
 # the 200 ms refractory period QRS detectors use (Pan and Tompkins 1985),

@@ -259,6 +259,8 @@ def part_nsrdb(lab: Labeller, raw: Path, max_records: int) -> None:
             rep = dl.report()
             tot[f"{tag}_wct"] += sum(a.kind == "WCT" for a in alerts)
             tot[f"{tag}_nsvt"] += rep["nsvt"]
+            tot[f"{tag}_cpl"] += rep["couplets"]
+            tot[f"{tag}_trp"] += rep["triplets"]
             tot[f"{tag}_big"] += rep["bigeminy_episodes"]
             tot[f"{tag}_tri"] += rep["trigeminy_episodes"]
             tot[f"{tag}_pvc"] += rep["beats"]["PVC"]
@@ -278,7 +280,8 @@ def part_nsrdb(lab: Labeller, raw: Path, max_records: int) -> None:
     tags = ["model"] + (["expert"] if not lab.oracle else [])
     shown = {"model": "expert" if lab.oracle else "model", "expert": "expert"}
     print(f"\n{'per 24 h':<22}" + "".join(f"{shown[t]:>10}" for t in tags))
-    for key, label in (("wct", "WCT alerts (false)"), ("nsvt", "NSVT"), ("big", "bigeminy episodes"),
+    for key, label in (("wct", "WCT alerts (false)"), ("nsvt", "NSVT"), ("cpl", "couplets"),
+                       ("trp", "triplets"), ("big", "bigeminy episodes"),
                        ("tri", "trigeminy episodes")):
         print(f"{label:<22}" + "".join(f"{tot[f'{t}_{key}'] / d:>10.2f}" for t in tags))
     print(f"{'PVC share of beats':<22}" + "".join(
