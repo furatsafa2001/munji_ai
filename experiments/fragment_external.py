@@ -1,5 +1,11 @@
 """Train VT-vs-VF on the ECG Fragment Database, test on uncurated windows.
 
+Superseded by munji_ai/eval/vf_vt_cardiologist.py. This script reads the
+fragments as 360 Hz and resamples them to 250 Hz, but their samples are
+already 250 Hz (data/fragments.py): every fragment here plays 1.44 times
+too fast, so frequency and rate measures are off by that factor, and the
+external test compares squeezed fragments with real windows.
+
     python experiments/fragment_external.py                 # test on CUDB
     python experiments/fragment_external.py --vfdb-logo     # held-out VFDB patients
 

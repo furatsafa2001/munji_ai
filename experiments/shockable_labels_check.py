@@ -44,7 +44,6 @@ Reads only, unless --write-clean is given. Test-split patients are skipped.
 from __future__ import annotations
 
 import argparse
-import re
 import sys
 from collections import Counter, defaultdict
 from pathlib import Path
@@ -55,11 +54,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from munji_ai import config as C  # noqa: E402
 from munji_ai.data import preprocess as pp  # noqa: E402
-from munji_ai.data.loader import _patient_id, load_record  # noqa: E402
-from munji_ai.data.registry import get  # noqa: E402
+from munji_ai.data.fragments import ALIGN_MIN_R, fragment_files, locate  # noqa: E402
+from munji_ai.data.loader import load_record  # noqa: E402
 from munji_ai.data.shockable_labels import (INTERMEDIATE, acf_rates, label_windows,  # noqa: E402
                                             window_class)
-from munji_ai.data.splits import assign  # noqa: E402
 from munji_ai.data.windows import (_frames, dominant_label, rhythm_intervals,  # noqa: E402
                                    split_vt_by_rate)
 from munji_ai.eval.eval_beats_model import eligible  # noqa: E402
@@ -71,7 +69,6 @@ STEP_MIN = C.WINDOW_STRIDE_SEC["shockable"] / 60.0
 EC13 = {"aami4a": (206, "1x"), "aami4a_d": (206, "half"), "aami4a_h": (206, "double"),
         "aami4b": (195, "1x"), "aami4b_d": (195, "half"), "aami4b_h": (195, "double")}
 EC13_LEAD_IN_SEC = 30.0          # each record opens with 30 s of triangle waves
-FRAGMENT = re.compile(r"^(\d+)_C_([A-Za-z]+)_(\d+)s_frag$", re.IGNORECASE)
 BANDS = ("150+", "100-150", "<100", "irregular")
 
 
@@ -123,136 +120,39 @@ def part_ec13(root: Path) -> None:
 
 
 # ------------------------------------------------------------------- fragments
-ALIGN_SCALES = (1.0, 360.0 / 250.0, 250.0 / 360.0)   # the name's seconds as given, or read at the other rate
-ALIGN_SEARCH_SEC = 10.0
-ALIGN_MIN_R = 0.8
-
-
-def read_fragment(path: Path):
-    """(samples, sampling rate if the file states one) of one fragment file."""
-    suffix = path.suffix.lower()
-    try:
-        if suffix == ".hea":
-            import wfdb
-            r = wfdb.rdrecord(str(path.with_suffix("")))
-            return np.asarray(r.p_signal[:, 0], np.float64), float(r.fs)
-        if suffix == ".mat":
-            from scipy.io import loadmat
-            arrays = [np.asarray(v, np.float64).ravel() for k, v in loadmat(str(path)).items()
-                      if not k.startswith("__") and np.issubdtype(np.asarray(v).dtype, np.number)]
-            return (max(arrays, key=len), None) if arrays else (None, None)
-        vals = []
-        for line in path.read_text(errors="ignore").split():
-            try:
-                vals.append(float(line.replace(",", ".")))
-            except ValueError:
-                continue
-        return (np.asarray(vals, np.float64), None) if vals else (None, None)
-    except Exception:
-        return None, None
-
-
-def _bandpass(x: np.ndarray, fs: float) -> np.ndarray:
-    from scipy.signal import butter, sosfiltfilt
-    sos = butter(2, [1.0 / (fs / 2), 30.0 / (fs / 2)], btype="band", output="sos")
-    return sosfiltfilt(sos, x)
-
-
-def best_match(seg: np.ndarray, tpl: np.ndarray):
-    """Highest Pearson correlation of tpl against every position in seg, and where."""
-    n = len(tpl)
-    if len(seg) < n or n < 10:
-        return -1.0, 0
-    t = tpl - tpl.mean()
-    t = t / (np.sqrt((t * t).sum()) + 1e-12)
-    c = np.correlate(seg, t, mode="valid")
-    cs = np.concatenate([[0.0], np.cumsum(seg)])
-    cs2 = np.concatenate([[0.0], np.cumsum(seg * seg)])
-    s1, s2 = cs[n:] - cs[:-n], cs2[n:] - cs2[:-n]
-    r = c / np.sqrt(np.maximum(s2 - s1 * s1 / n, 1e-12))
-    k = int(np.argmax(r))
-    return float(r[k]), k
-
-
 def part_fragments(root: Path, raw: Path) -> None:
-    """Each fragment is first found in our VFDB copy by its waveform (the
-    seconds in its name are only a starting point), then the 5 s window
-    around it is labelled as the cache would label it."""
-    import wfdb
-    from scipy.signal import resample_poly
-
-    from munji_ai.data.loader import dataset_dir
-
+    """Each fragment is first found in our VFDB copy by its waveform
+    (munji_ai/data/fragments.py: the seconds in its name are only a starting
+    point), then the 5 s window around it is labelled as the cache would."""
     print("\n2. Cardiologist labels (ECG Fragment Database) against the rate band")
     if not root.exists():
         print(f"   no {root}; download first (see the top of this file)")
         return
-    files = {}
-    for path in sorted(root.rglob("*")):
-        m = FRAGMENT.match(path.stem)
-        if m and path.is_file() and path.suffix.lower() != ".dat":
-            key = (m.group(1), m.group(2).upper(), int(m.group(3)))
-            if key not in files or path.parent.name.lower() == "frag":
-                files[key] = path
-    if not files:
+    if not fragment_files(root):
         print(f"   no fragment files (record_C_LABEL_seconds_frag) under {root}")
         return
-    ds = get("vfdb")
-    recs, rows, skipped, wins = {}, [], Counter(), Counter()
-    best_r = []
-    for (rec_name, lab, sec), path in sorted(files.items()):
-        try:
-            if assign(_patient_id(ds, rec_name)) == "test":
-                skipped["test split"] += 1
-                continue
-        except ValueError:
-            skipped["not a VFDB record"] += 1
-            continue
+    found, skipped, best_r, wins = locate(root, raw)
+    recs, rows = {}, []
+    for f in found:
+        rec_name = f["record"]
         if rec_name not in recs:
             try:
-                hit = next(iter(dataset_dir(ds, raw).rglob(f"{rec_name}.hea")))
-                r = wfdb.rdrecord(str(hit.with_suffix("")))
-                chans = [_bandpass(np.nan_to_num(np.asarray(r.p_signal[:, c], np.float64)), r.fs)
-                         for c in range(r.p_signal.shape[1])]
                 rec = load_record("vfdb", rec_name, raw)
-                recs[rec_name] = (rec, rhythm_intervals(rec), chans, float(r.fs))
+                recs[rec_name] = (rec, rhythm_intervals(rec))
             except Exception:
                 recs[rec_name] = None
         if recs[rec_name] is None:
             skipped["VFDB record not found"] += 1
             continue
-        rec, iv, chans, fs_raw = recs[rec_name]
-        vals, fs_file = read_fragment(path)
-        if vals is None or len(vals) < 100:
-            skipped["fragment unreadable"] += 1
-            continue
-        best = (-1.0, None)
-        for fs_frag in ([fs_file] if fs_file else [360.0, 250.0]):
-            from math import gcd
-            up, down = int(fs_raw), int(fs_frag)
-            g = gcd(up, down)
-            tpl = _bandpass(resample_poly(vals, up // g, down // g), fs_raw)
-            for k in ALIGN_SCALES:
-                a = int(max(0.0, (sec * k - ALIGN_SEARCH_SEC) * fs_raw))
-                b = int((sec * k + ALIGN_SEARCH_SEC) * fs_raw) + len(tpl)
-                for ch, xc in enumerate(chans):
-                    rr, pos = best_match(xc[a:b], tpl)
-                    if rr > best[0]:
-                        best = (rr, (k, fs_frag, ch, (a + pos + len(tpl) / 2) / fs_raw))
-        best_r.append(best[0])
-        if best[0] < ALIGN_MIN_R:
-            skipped[f"not found in VFDB (best correlation under {ALIGN_MIN_R})"] += 1
-            continue
-        k, fs_frag, ch, centre = best[1]
-        wins[(k, fs_frag, ch)] += 1
-        lo = int(centre * FS) - WIN // 2               # 5 s around the matched fragment
+        rec, iv = recs[rec_name]
+        lo = int(f["centre_s"] * FS) - WIN // 2        # 5 s around the matched fragment
         if lo < 0 or lo + WIN > len(rec.signal):
             skipped["at the record's edge"] += 1
             continue
         rate, reg = acf_rates(rec.signal[lo:lo + WIN][None, :], FS)
         orig = dominant_label(iv, lo, lo + WIN, 0.5) or "mixed"
         new = label_windows(rec.signal, FS, iv, [lo], WIN)[0]
-        rows.append({"frag": lab, "band": band(rate[0]), "rate": rate[0], "reg": reg[0],
+        rows.append({"frag": f["label"], "band": band(rate[0]), "rate": rate[0], "reg": reg[0],
                      "orig": orig, "new": new, "cls": window_class(new)})
     if best_r:
         print(f"   found in our VFDB copy: {sum(r >= ALIGN_MIN_R for r in best_r)} of {len(best_r)} fragments "
@@ -264,7 +164,7 @@ def part_fragments(root: Path, raw: Path) -> None:
         print("   skipped: " + ", ".join(f"{k} {v}" for k, v in skipped.items()))
     if not rows:
         return
-    labs = sorted({r["frag"] for r in rows}, key=lambda k: -sum(r["frag"] == k for r in rows))
+    labs = sorted({r["frag"] for r in rows}, key=lambda k: (-sum(r["frag"] == k for r in rows), k))
     print(f"   {'cardiologist':<14}{'n':>5}" + "".join(f"{b:>11}" for b in BANDS)
           + f"{'median bpm':>12}   VFDB label (most common)")
     for k in labs:

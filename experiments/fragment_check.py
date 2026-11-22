@@ -1,5 +1,11 @@
 """VT against VF on the ECG Fragment Database, with cardiologist-revised labels.
 
+Superseded by munji_ai/eval/vf_vt_cardiologist.py. This script reads the
+fragments as 360 Hz and resamples them to 250 Hz, but their samples are
+already 250 Hz (data/fragments.py): every fragment here plays 1.44 times
+too fast, so frequency and rate measures are off by that factor, and the
+external test compares squeezed fragments with real windows.
+
     python experiments/fragment_check.py --root data/raw/ecg_fragments
 
 The ECG Fragment Database (PhysioNet, 2022) re-labels VFDB in 2 s fragments,
