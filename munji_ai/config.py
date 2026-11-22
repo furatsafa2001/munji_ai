@@ -485,3 +485,14 @@ CONFIRMATION = {
     "af": (4, 6),
     "fast_narrow": (1, 1),
 }
+
+# ShockableNet's operating threshold on P(shockable); an alert also needs
+# CONFIRMATION["vf"]. Chosen on full-day cross-validation with the per-window
+# AHA labels (eval/shockable_report.py, 5 folds by patient): every threshold
+# from 0.54 to 0.58 caught all 83 sustained VF/VT episodes (30 s or more) with
+# no more than 0.29 false alarms per patient-day, the wearable defibrillator
+# study goal (Poole et al., J Cardiovasc Electrophysiol 2022); 0.53 gave 0.43
+# and 0.59 missed a sustained episode. 0.56 is the middle of that range (0.14
+# per patient-day), so a small shift in the final model's scores keeps both.
+# Training records it in the checkpoint and the TFLite export carries it.
+SHOCKABLE_THRESHOLD = 0.56

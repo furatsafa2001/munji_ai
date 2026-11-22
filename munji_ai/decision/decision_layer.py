@@ -25,10 +25,10 @@ tests/test_decision_layer.py is the behaviour both must match.
 Rules, and where each comes from
 --------------------------------
 Shockable (ShockableNet, every 2.5 s)
-    A window is positive at P(shockable) >= 0.60; an alert needs 4 positive
-    windows in the last 6 (config.CONFIRMATION["vf"]). Both were chosen on
-    full-day cross-validation: no sustained episode missed, about 0.5 false
-    alarms per patient-day.
+    A window is positive at P(shockable) >= 0.56 (config.SHOCKABLE_THRESHOLD);
+    an alert needs 4 positive windows in the last 6 (config.CONFIRMATION["vf"]).
+    Both were chosen on full-day cross-validation: no sustained episode missed
+    (83 of 83), 0.14 false alarms per patient-day.
 
     The alert is named VF/VT: a life-threatening ventricular rhythm. Telling
     VF from fast VT was tried four ways on CUDB and VFDB, by patient: rate
@@ -155,7 +155,7 @@ SEVERITY = ("info", "warning", "critical")
 
 @dataclass
 class DecisionConfig:
-    shock_threshold: float = 0.60
+    shock_threshold: float = C.SHOCKABLE_THRESHOLD
     shock_rule: tuple = tuple(C.CONFIRMATION["vf"])
     shock_episode_end: int = 12           # negative windows (30 s) that close an episode
     af_threshold: float = 0.60

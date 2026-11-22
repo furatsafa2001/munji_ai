@@ -52,7 +52,7 @@ from ..data.windows import load_cache
 SPECS = {
     "shockable": {"name": "shockable_net", "stage": "shockable", "rule_key": "vf",
                   "classes": ["not_shockable", "shockable"], "positive": "shockable",
-                  "threshold": 0.60},
+                  "threshold": C.SHOCKABLE_THRESHOLD},
     "rhythm": {"name": "rhythm_net", "stage": "rhythm", "rule_key": "af",
                "classes": list(C.RHYTHM_CLASSES), "positive": "AF", "threshold": 0.60},
 }

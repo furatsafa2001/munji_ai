@@ -65,7 +65,9 @@ from .false_alarm_rate import (SUSTAINED_S, count_alarms, fold_of_records,
 POS = "shockable"
 STEP = C.WINDOW_STRIDE_SEC["shockable"]
 WIN_S = C.WINDOW_SEC["shockable"]
-SWEEP = (0.50, 0.55, 0.60, 0.65, 0.70)
+# Every 0.02 around the operating point: the range that keeps every sustained
+# episode with few false alarms is narrow (config.SHOCKABLE_THRESHOLD).
+SWEEP = (0.50, 0.52, 0.54, 0.56, 0.58, 0.60, 0.65, 0.70)
 
 # Published targets each figure answers to. Values only from the sources named.
 AHA = "AHA AED performance goals (Kerber et al., Circulation 1997)"
@@ -507,7 +509,7 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--models", type=Path, required=True)
-    ap.add_argument("--threshold", type=float, default=0.65)
+    ap.add_argument("--threshold", type=float, default=C.SHOCKABLE_THRESHOLD)
     ap.add_argument("--out", type=Path, default=Path("reports") / "shockable")
     ap.add_argument("--cache", type=Path, default=CACHE_DIR)
     ap.add_argument("--raw", type=Path, default=RAW_DIR)
