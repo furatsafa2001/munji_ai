@@ -1,8 +1,8 @@
 {
   "model": "shockable_net",
   "file": "shockable_net.tflite",
-  "exported": "2026-10-26",
-  "sha256": "3a5de31a29ed713fd61b0e9390e20d7cef37fdd7af11d305dd24d4c0b23a6799",
+  "exported": "2026-11-22",
+  "sha256": "1d15b754a701325cf60d9b99b8d5835a7a8fe30ccabd2b679e63b1ad95b20628",
   "input": {
     "shape": [
       1,
@@ -41,7 +41,7 @@
   },
   "decision": {
     "positive_class": "shockable",
-    "threshold": 0.6,
+    "threshold": 0.56,
     "confirmation_n_of_m": [
       4,
       6
@@ -49,23 +49,23 @@
     "meaning": "alert when n of the last m windows reach the threshold"
   },
   "training": {
-    "epoch": 8,
+    "epoch": 14,
     "augment": true,
-    "extra_negatives": "data/cache/shockable_extra_neg_v2.npz"
+    "extra_negatives": "data/cache/shockable_extra_neg_v3.npz"
   },
   "verification": {
     "split": "val",
-    "windows": 3482,
-    "max_abs_diff": 2.980232238769531e-07,
-    "mean_abs_diff": 1.377538971780723e-08,
+    "windows": 3451,
+    "max_abs_diff": 6.705522537231445e-07,
+    "mean_abs_diff": 1.732617960215066e-08,
     "threshold_flips": 0,
     "pytorch": {
-      "sensitivity": 0.8452914798206278,
-      "specificity": 0.9746376811594203
+      "sensitivity": 0.8444976076555024,
+      "specificity": 0.997692054071876
     },
     "tflite": {
-      "sensitivity": 0.8452914798206278,
-      "specificity": 0.9746376811594203
+      "sensitivity": 0.8444976076555024,
+      "specificity": 0.997692054071876
     },
     "passed": true
   }
