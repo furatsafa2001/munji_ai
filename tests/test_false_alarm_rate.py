@@ -82,6 +82,20 @@ def main() -> int:
           f"{c5['episodes']} episodes, {c5['sus_episodes']} sustained")
     z = far.count_alarms(np.zeros(20, bool), np.zeros(20, bool), rule)
     check("no positives, no alarms", (z["false"], z["true"]) == (0, 0))
+    inter = np.zeros_like(P)
+    inter[7:10] = True                       # an intermediate rhythm (slow VT) under the late positives
+    c6 = far.count_alarms(P, T, rule, excluded=inter)
+    check("an alarm over an intermediate rhythm only is neither true nor false",
+          (c6["false"], c6["true"], c6["intermediate"]) == (1, 0, 1),
+          f"false {c6['false']}, true {c6['true']}, intermediate {c6['intermediate']}")
+    check("... and the intermediate windows and their alarm coverage are reported",
+          (c6["inter_windows"], c6["inter_fired"]) == (3, 1),
+          f"{c6['inter_windows']} windows, {c6['inter_fired']} under an alarm")
+    c7 = far.count_alarms(P, T2, rule, excluded=inter)
+    check("a shockable window in the confirming span still makes an alarm true",
+          c7["true"] == 1 and c7["episodes"] == 1)
+    check("without excluded=, counting is as before",
+          (far.count_alarms(P, T, rule)["false"], far.count_alarms(P, T, rule)["intermediate"]) == (2, 0))
 
     print("\nWindowing\n")
     sig = ecg(60, C.TARGET_FS)

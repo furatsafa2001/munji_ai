@@ -165,7 +165,14 @@ def main():
           before["beat"] != after["beat"])
     check("... and no other stage's",
           all(before[s] == after[s] for s in stages if s != "beat"))
-    check("the beat hash is the all-values hash", W.config_hash("beat") == W.config_hash())
+    old_reg = C.VT_RATE_MIN_REGULARITY
+    C.VT_RATE_MIN_REGULARITY = old_reg + 0.1
+    shock = {s: W.config_hash(s) for s in stages}
+    C.VT_RATE_MIN_REGULARITY = old_reg
+    check("a shockable-only setting (label rules) changes the shockable hash",
+          before["shockable"] != shock["shockable"])
+    check("... and no other stage's",
+          all(before[s] == shock[s] for s in stages if s != "shockable"))
     C.MODEL_BAND = (0.7, 40.0)
     shared = {s: W.config_hash(s) for s in stages}
     C.MODEL_BAND = old
@@ -197,6 +204,10 @@ def main():
         check("a beat cache without the beat settings is refused", not loads("beat"))
         stamp("beat", after["beat"])
         check("a beat cache from another beat setting is refused", not loads("beat"))
+        stamp("shockable", W.config_hash("shockable"))
+        check("a shockable cache with the shockable hash loads", loads("shockable"))
+        stamp("shockable", W.config_hash("rhythm"))
+        check("a shockable cache built before the label rules is refused", not loads("shockable"))
 
     print("\n10. memory estimate at configured caps")
     for stage in ("quality", "beat", "rhythm", "shockable"):

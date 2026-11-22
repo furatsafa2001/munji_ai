@@ -16,11 +16,14 @@ of the AHA framework" are excluded, and one group reports that of 75 patients
 across CUDB, VFDB and SDDB, 40 "remained following the culling". Test sets are
 often the manufacturer's own curated strips rather than raw PhysioNet.
 
-We evaluate on everything. A window that is half fibrillation and half noise
-counts as fibrillation here, because SHOCKABLE_PURITY is 0.5. A window on the
-boundary of an episode counts. A window during motion artifact counts. Those
-are the hard cases, and they are where most of the errors sit — so the two
-figures are measuring different things.
+We evaluate on everything. A window during motion artifact counts. Until
+the per-window labels (config SHOCKABLE_LABELS, since aha-window-v1) a window that
+was half fibrillation and half noise counted as fibrillation, because
+SHOCKABLE_PURITY is 0.5, and a window on the boundary of an episode counted;
+the cache now takes single-rhythm windows only, as Figuera et al. 2016 do, so
+on a cache built since then the single-rhythm condition below removes little
+and the artifact condition does the work. Those are the hard cases, and they
+are where most of the errors sit, so the two figures measure different things.
 
 This script applies the published selection to our out-of-fold predictions
 and reports both. Nothing is retrained and nothing in the prediction file

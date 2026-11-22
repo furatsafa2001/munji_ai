@@ -207,6 +207,44 @@ AMBIGUOUS_RHYTHMS = ("NOISE", "UNKNOWN")
 # not be measured. Neither shockable nor safe — unknown. Labelling it
 # not_shockable is the wrong side of the miss/false-alarm trade.
 SHOCKABLE_EXCLUDED = AMBIGUOUS_RHYTHMS + ("VT",)
+
+# Shockable labels, one per window (data/shockable_labels.py): the AHA
+# framework for shock advisory algorithms as published work applies it to
+# CUDB and VFDB. Used by the shockable cache and by the shockable evaluation
+# (false_alarm_rate.truth_flags), so training and scoring read the same labels.
+#
+# AHA (Kerber et al., Circulation 1997;95:1677) sorts rhythms into shockable
+# (coarse VF, rapid VT), nonshockable, and intermediate (fine VF, other VT);
+# intermediate rhythms have no performance goal and are reported only.
+# Figuera et al. (PLoS ONE 2016;11:e0159654), on these same databases: "slow
+# VT (rate under 150 bpm) and fine VF were excluded", fine VF being under
+# 200 uV peak to peak, and "segments with rhythm transitions were excluded".
+# Their labels were revised by hand; here each window is measured:
+#   VT rate   autocorrelation of the window. The episode rate used before
+#             (windows._episode_bpm) read smooth or small VT far too slow:
+#             47% of the windows it called VT_SLOW, trained as NOT shockable,
+#             were 150 bpm or more (experiments/vt_rate_check.py).
+#   fine VF   peak to peak of the window, model path, mV.
+# An irregular VT window has no rate to compare with 150: it does not repeat,
+# which is polymorphic VT. It is shockable. AHA's shockable VT category covers
+# polymorphic VT and flutter (performance table, Kerber 1997, as AED makers
+# report it), and AHA 2025 ACLS shocks polymorphic VT unsynchronised, like VF.
+# Checked against cardiologist labels (ECG Fragment Database: VFDB re-labelled
+# at LETI with Almazov Centre cardiologists; experiments/shockable_labels_check.py):
+# every one of the 31 irregular VT windows there was VF or torsade de pointes.
+#
+# SHOCKABLE_PURITY and SHOCKABLE_EXCLUDED above still describe the episode
+# labels of windows.split_vt_by_rate, which the VT experiments read. They stay
+# unchanged in every cache's fingerprint; this block is in the shockable
+# cache's alone, so changing it invalidates that cache and no other.
+SHOCKABLE_LABELS = "aha-window-v2"   # v2: irregular VT shockable, not left out
+SHOCKABLE_WINDOW_PURITY = 1.0        # one rhythm over the whole window
+FINE_VF_MAX_PTP_MV = 0.2             # VF under this, peak to peak: fine VF
+VT_RATE_LAG_SEC = (0.2, 1.2)         # autocorrelation search: 300 to 50 bpm
+VT_RATE_NEAR_TOP = 0.85              # first peak this close to the highest: not a multiple
+VT_RATE_MIN_REGULARITY = 0.5         # highest peak under this: irregular, no rate
+SHOCKABLE_WINDOW_RHYTHMS = ("VF", "VT_FAST", "VT_IRREGULAR")
+SHOCKABLE_WINDOW_EXCLUDED = AMBIGUOUS_RHYTHMS + ("VT_SLOW", "VF_FINE")
 # Two classes, not three. The old good / qrs_only / unusable split put an
 # arbitrary 12 dB line through a continuum; merging the first two raised
 # accuracy from 0.66 to 0.92 on identical data. The remaining boundary is
