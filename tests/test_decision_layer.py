@@ -13,7 +13,8 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from munji_ai import config as C
-from munji_ai.decision.decision_layer import DecisionConfig, DecisionLayer, beats_from_mask
+from munji_ai.decision.decision_layer import (DecisionConfig, DecisionLayer, beats_from_mask,
+                                             supraventricular_run)
 from munji_ai.rules.rate_engine import Finding, RateReport
 
 ok = True
@@ -395,6 +396,80 @@ def main() -> int:
     feed(dl, vt, until=30.0)
     out = shock(dl, 22.5)
     check("with naming on, the same case is alerted as 'VT'", kinds(out) == ["VT"], str(kinds(out)))
+
+    print("\nSVT, named by origin (off by default)\n")
+    check("SVT naming is off in config", C.SVT_NAMING_ENABLED is False)
+
+    def svt_case(pattern, p_shock=(0.1,) * 6, p_af=0.05, fast=190.0, rhythm_at=40.0,
+                 usable=True, naming=True, findings=(), beats=True):
+        """Beats up to 40 s, then ShockableNet, RhythmNet and one rate window at 40 s."""
+        dl = DecisionLayer(DecisionConfig(svt_naming=naming))
+        if beats:
+            feed(dl, stream(pattern), until=40.0)
+        for i, p in enumerate(p_shock):
+            dl.on_shockable(40.0 - (len(p_shock) - 1 - i) * 2.5, p)
+        if rhythm_at is not None:
+            dl.on_rhythm(rhythm_at, (0.95 - p_af, p_af, 0.05))
+        out = dl.on_rate(40.0, RateReport(bpm=fast, fast_run_bpm=fast, findings=list(findings)),
+                         usable=usable)
+        return dl, out
+
+    svt = [("N", 190, 126)]                              # 40 s at 190, every beat N
+    dl, _ = svt_case(svt)
+    check("190 bpm, N beats, ShockableNet quiet, not AF: named SVT",
+          dl.svt_now and dl.report()["svt_windows"] == 1)
+    ep = dl.report()["svt_episodes"]
+    check("... one episode in the report, with its fastest rate",
+          len(ep) == 1 and abs(ep[0][2] - 190) < 2, str(ep))
+    dl, _ = svt_case(svt, naming=False)
+    check("same evidence with naming off: not named",
+          not dl.svt_now and dl.report()["svt_windows"] == 0)
+    dl, _ = svt_case([("PVC", 190, 126)])
+    check("PVC beats (VT): never SVT", not dl.svt_now)
+    dl, _ = svt_case([("N", 190, 4), ("PVC", 190, 1)] * 25)
+    check("one scattered PVC in five, as N N N N PVC: named (the 80% line)", dl.svt_now)
+    dl, _ = svt_case([("N", 190, 13), ("PVC", 190, 3)] * 8)
+    check("3 PVCs in a row inside every run: not named, an NSVT is not SVT", not dl.svt_now)
+    dl, _ = svt_case(svt, p_shock=(0.1,) * 5 + (0.9,))
+    check("one ShockableNet window positive in the last 6: not named", not dl.svt_now)
+    dl, _ = svt_case(svt, p_shock=(0.9,) + (0.1,) * 14)
+    check("a positive 35 s ago, older than the last 6 but inside the 40 s rate window: "
+          "not named", not dl.svt_now)
+    dl, _ = svt_case(svt, p_shock=(0.9,) + (0.1,) * 17)
+    check("... 42.5 s ago, before the rate window: named", dl.svt_now)
+    dl, _ = svt_case(svt, p_af=0.9)
+    check("RhythmNet says AF: not named (AF/AFL has its own alert)", not dl.svt_now)
+    dl, _ = svt_case(svt, rhythm_at=5.0)
+    check("latest rhythm window 35 s old: not named", not dl.svt_now)
+    dl, _ = svt_case(svt, rhythm_at=None)
+    check("no rhythm window at all: not named", not dl.svt_now)
+    dl, _ = svt_case([("N", 130, 87)], fast=130.0)
+    check("130 bpm: not named (150 or more)", not dl.svt_now)
+    dl, _ = svt_case([("N", 100, 67)], fast=190.0)
+    check("engine says 190 but the beats hold 100: not named", not dl.svt_now)
+    dl, _ = svt_case(svt, usable=False)
+    check("gate-rejected rate window: not named", not dl.svt_now)
+    dl, _ = svt_case(svt, beats=False)
+    check("no beat-model output: not named", not dl.svt_now)
+
+    held = Finding("sustained_tachycardia", "critical", 190.0, detail="heart rate 190, held 30 s")
+    dl, out = svt_case(svt, findings=(held,))
+    check("a sustained tachycardia alert during SVT carries the name",
+          kinds(out) == ["sustained_tachycardia"] and out[0].evidence.get("rhythm") == "SVT"
+          and "possible SVT" in out[0].detail and out[0].severity == "warning",
+          out[0].detail if out else "")
+    dl, out = svt_case(svt, findings=(held,), naming=False)
+    check("... and without naming it is the plain rate alert",
+          kinds(out) == ["sustained_tachycardia"] and "rhythm" not in out[0].evidence)
+    dl, _ = svt_case(svt)
+    for i in range(1, 7):
+        dl.on_rate(40.0 + i * 2.5, RateReport(bpm=80.0, fast_run_bpm=85.0), usable=True)
+    rep = dl.report()["svt_episodes"]
+    check("6 windows without SVT close the episode",
+          rep == [(40.0, 40.0, rep[0][2])] and dl._svt_ep is None,
+          str(rep))
+    check("fewer than 18 beats: no run, no rate",
+          np.isnan(supraventricular_run([(i * 0.3, "N") for i in range(17)])))
 
     print("\n" + ("ALL CHECKS PASSED" if ok else "FAILURES ABOVE"))
     return 0 if ok else 1

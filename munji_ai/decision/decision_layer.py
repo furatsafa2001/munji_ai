@@ -92,8 +92,23 @@ Priority
 
     The engine no longer names a fast rhythm narrow (SVT) or wide: its width
     estimate failed on the QT Database. Ventricular rhythms come from the
-    ventricular-beat detector. If the SVT label returns, it stays held while
-    ShockableNet saw danger in the last 6 windows (ventricular_hold).
+    ventricular-beat detector, and SVT is named by origin (below). The old
+    width label, if it returns, stays held while ShockableNet saw danger in
+    the last 6 windows (ventricular_hold).
+
+SVT, named by origin (off: config.SVT_NAMING_ENABLED)
+    SVT is any tachycardia arising at or above the His bundle, AF excluded
+    (2015 ACC/AHA/HRS). Width was only ever a sign of that origin, so origin
+    is read from the models instead. A rate window is named SVT when the
+    engine holds 150 bpm or more over a tachy run, the beat model's own beats
+    hold it too over a run that is at least 80% N or PAC with no 3 PVCs in a
+    row, ShockableNet saw no VF/VT anywhere in the rate window (40 s: a VT
+    that ended 30 s ago is still in its beats) and has no episode open, and
+    RhythmNet's latest usable window (at most 30 s old) is not AF. Missing
+    evidence never names it. Report only: windows and episodes (first named,
+    last named, fastest rate). A sustained tachycardia alert (180 held 30 s)
+    sent during an SVT episode carries the name, as MCOT notifies "SVT or AF"
+    at 180.
 
 Beats (BeatSegmenter, every beat window)
     Each beat arrives as (time in seconds, "N" | "PAC" | "PVC");
@@ -167,6 +182,7 @@ class DecisionConfig:
     ventricular_hold: tuple = ("fast_narrow",)
     rate_episode_end: int = 6             # windows without the finding that close an episode
     vfvt_naming: bool = C.VFVT_NAMING_ENABLED
+    svt_naming: bool = C.SVT_NAMING_ENABLED
 
 
 @dataclass
@@ -213,6 +229,40 @@ def beats_from_mask(mask, t_start: float, fs: int = C.TARGET_FS) -> list:
         out.append((t_start + ((i + j) // 2) / fs, C.BEAT_CLASSES[c]))
         i = j
     return out
+
+
+def supraventricular_run(beats, n: int = C.RATE_RUN_BEATS["tachy"]) -> float:
+    """Fastest rate held by a run of supraventricular beats; NaN if none.
+
+    beats: [(time_s, "N" | "PAC" | "PVC")] in time order. A run is n
+    consecutive intervals (n + 1 beats), averaged as the rate engine averages
+    a run (config.RATE_RUN_TRIM). It counts when at least
+    SVT_MIN_SUPRA_FRACTION of its beats are N or PAC and no VT_MIN_BEATS of
+    them are PVCs in a row.
+    """
+    if len(beats) < n + 1:
+        return float("nan")
+    t = np.array([b[0] for b in beats], dtype=np.float64)
+    supra = np.array([c in ("N", "PAC") for _, c in beats])
+    pvc = [c == "PVC" for _, c in beats]
+    rr = np.diff(t)
+    k = int(round(n * C.RATE_RUN_TRIM))
+    if n - 2 * k < 1:
+        k = (n - 1) // 2
+    best = float("nan")
+    for i in range(len(beats) - n):
+        if supra[i:i + n + 1].mean() < C.SVT_MIN_SUPRA_FRACTION:
+            continue
+        run = longest = 0
+        for v in pvc[i:i + n + 1]:
+            run = run + 1 if v else 0
+            longest = max(longest, run)
+        if longest >= C.VT_MIN_BEATS:
+            continue
+        m = float(np.sort(rr[i:i + n])[k:n - k].mean())
+        if m > 0:
+            best = 60.0 / m if np.isnan(best) else max(best, 60.0 / m)
+    return best
 
 
 class _Episode:
@@ -278,6 +328,14 @@ class DecisionLayer:
         self._vt_last_true = -np.inf
         self.recording_requests: list = []
         self._recordings_taken = 0
+        # SVT naming
+        self._rhythm_last = None              # (t, is_af), latest usable rhythm window
+        self._last_shock_positive = -np.inf   # end of the latest ShockableNet positive
+        self.svt_now = False                  # the latest rate window was named SVT
+        self.svt_windows = 0
+        self.svt_episodes: list = []          # (first named, last named, fastest bpm)
+        self._svt_ep = None
+        self._svt_quiet = 0
 
     # ---------------------------------------------------------------- inputs
     def on_shockable(self, t: float, p_shockable: float, rate=None,
@@ -289,6 +347,8 @@ class DecisionLayer:
         silenced = lead_off is True or (self.cfg.gate_shockable_on_quality and not usable)
         positive = (not silenced) and p_shockable >= self.cfg.shock_threshold
         self._shock_recent.append(positive)
+        if positive:
+            self._last_shock_positive = t
         if self._shock.step(positive):
             bpm = getattr(rate, "bpm", float("nan")) if rate is not None else float("nan")
             guess = self._vfvt_guess(t)
@@ -307,6 +367,7 @@ class DecisionLayer:
             return []
         self.rhythm_windows += 1
         is_af = p_af >= self.cfg.af_threshold
+        self._rhythm_last = (t, is_af)
         self.af_windows += int(is_af)
         self.other_windows += int(not is_af and p_other >= max(p_nsr, p_af))
         out = []
@@ -355,6 +416,7 @@ class DecisionLayer:
         for family, f in graded.items():
             by_sev = self.rate_report_windows.setdefault(family, {})
             by_sev[f.severity] = by_sev.get(f.severity, 0) + 1
+        self._svt_step(t, rate, monitored and usable)
 
         out = []
         for family, key in RATE_FAMILIES.items():
@@ -377,9 +439,40 @@ class DecisionLayer:
             severity = NOTIFY_SEVERITY[f.notify]
             if self._shock.active and severity != "critical":
                 continue
-            out.append(Alert(t, f.kind, severity, "rate", f.detail,
-                             {"value": float(f.value), "notify": f.notify}))
+            detail, evidence = f.detail, {"value": float(f.value), "notify": f.notify}
+            if family == "tachy" and self._svt_ep is not None:
+                detail += "; possible SVT, a doctor should confirm on a 12-lead ECG"
+                evidence["rhythm"] = "SVT"
+            out.append(Alert(t, f.kind, severity, "rate", detail, evidence))
         return self._emit(out)
+
+    def _svt_step(self, t: float, rate, counts: bool) -> None:
+        """Name this rate window SVT or not, and keep the SVT episodes."""
+        named, bpm = False, float("nan")
+        last = self._rhythm_last
+        if (self.cfg.svt_naming and counts
+                and float(getattr(rate, "fast_run_bpm", float("nan"))) >= C.FAST_NARROW_BPM
+                and not self.ventricular_activity()
+                and t - self._last_shock_positive > C.RULES_WINDOW_SEC
+                and not self._af.active
+                and last is not None and not last[1]
+                and t - last[0] <= C.WINDOW_SEC["rhythm"]):
+            lo = t - C.RULES_WINDOW_SEC
+            bpm = supraventricular_run([b for b in self._beats if lo < b[0] <= t])
+            named = bpm >= C.FAST_NARROW_BPM
+        self.svt_now = named
+        if named:
+            self.svt_windows += 1
+            if self._svt_ep is None:
+                self._svt_ep = [t, t, bpm]
+            else:
+                self._svt_ep[1], self._svt_ep[2] = t, max(self._svt_ep[2], bpm)
+            self._svt_quiet = 0
+        elif self._svt_ep is not None:
+            self._svt_quiet += 1
+            if self._svt_quiet >= self.cfg.rate_episode_end:
+                self.svt_episodes.append(tuple(self._svt_ep))
+                self._svt_ep, self._svt_quiet = None, 0
 
     def on_beats(self, t: float, beats, usable: bool = True) -> list[Alert]:
         """One beat-model window. beats: [(time_s, "N" | "PAC" | "PVC")].
@@ -550,6 +643,9 @@ class DecisionLayer:
                 "nsvt": len(self.nsvt),
                 "nsvt_runs": list(self.nsvt),
                 "long_vt_runs": list(self.long_runs),
+                "svt_windows": self.svt_windows,
+                "svt_episodes": list(self.svt_episodes)
+                + ([tuple(self._svt_ep)] if self._svt_ep is not None else []),
                 "bigeminy_episodes": self.patterns["bigeminy"],
                 "trigeminy_episodes": self.patterns["trigeminy"],
                 "recording_requests": [(r.t, r.start, r.end, r.reason, r.shadow_name)

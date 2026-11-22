@@ -465,6 +465,23 @@ NOTIFY_TACHY_URGENT_BPM = 180      # at or above, held NOTIFY_SUSTAIN_SEC
 # width source passes. A fast rhythm is still reported and notified by rate.
 FAST_NARROW_LABEL = False
 
+# SVT is named by origin instead (2015 ACC/AHA/HRS: any tachycardia arising at
+# or above the His bundle; AF is excluded). A rate window is named SVT when
+#   the engine holds FAST_NARROW_BPM or more over a tachy run
+#     (RATE_RUN_BEATS["tachy"]), and so do the beat model's own beats, over a
+#     run in which at least SVT_MIN_SUPRA_FRACTION of the beats are N or PAC
+#     and no VT_MIN_BEATS PVCs come in a row (no NSVT inside),
+#   ShockableNet saw no VF/VT anywhere in the rate window (a VT that ended
+#     30 s ago is still in its 40 s of beats) and has no episode open, and
+#   RhythmNet's latest usable window, at most one window length old, is not AF.
+# 0.80 mirrors the WCT rule (VT_SUSTAINED_PVC_FRACTION), so no run can be both;
+# it is engineering, not a clinical line. Named only: on its own it is never
+# sent. A fast rhythm is still notified by rate (180 held 30 s; MCOT, "SVT or
+# AF"), and that alert then carries the name. Off until eval/eval_svt.py shows
+# no VT or VF named SVT on CUDB and VFDB.
+SVT_NAMING_ENABLED = False
+SVT_MIN_SUPRA_FRACTION = 0.80
+
 # Windows the rate engine runs on, derived from the definitions above, not
 # chosen. 40 s holds a 30 s sustained run whole (40 - 2.5 > 30), and so also a
 # gap longer than 6 s and a 5-beat run at any rate a heart can hold. Latency is
