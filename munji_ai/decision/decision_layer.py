@@ -2,8 +2,9 @@
 
     from munji_ai.decision.decision_layer import DecisionLayer
     dl = DecisionLayer()
-    alerts = dl.on_shockable(t, p_shockable, rate_report, lead_off=False)
-    # call on_shockable before on_rate for the same window
+    alerts = dl.on_shockable(t, p_shockable, rate_report, lead_off=False, p_vt=p_vt)
+    # call on_shockable before on_rate for the same window; p_vt from the
+    # VF-or-VT namer (models/vfvt_namer.py) on positive windows, else None
     alerts = dl.on_rhythm(t, (p_nsr, p_af, p_other), usable=True, lead_off=False)
     alerts = dl.on_rate(t, rate_report, usable=True, lead_off=False, complete=True)
     alerts = dl.on_beats(t, beats_from_mask(mask, t_start), usable=p_usable >= 0.90)
@@ -30,15 +31,14 @@ Shockable (ShockableNet, every 2.5 s)
     Both were chosen on full-day cross-validation: no sustained episode missed
     (83 of 83), 0.14 false alarms per patient-day.
 
-    The alert is named VF/VT: a life-threatening ventricular rhythm. Telling
-    VF from fast VT was tried four ways on CUDB and VFDB, by patient: rate
-    and regularity from the rate engine, dominant frequency and spectral
-    peak size from the literature, published complexity measures, and a
-    classifier on ShockableNet's own features. None separated them (AUC 0.3
-    to 0.6) with VT from only 8 recordings. Both rhythms need the same
-    response, an emergency call, so one honest name is safer than a guess.
-    Separate names return if more VT data (PhysioNet VTaC) makes them
-    reliable.
+    The alert is named VF/VT: a life-threatening ventricular rhythm. Both
+    need the same response, an emergency call, so one honest name is safer
+    than a guess. Telling them apart failed four ways on CUDB and VFDB's own
+    rhythm labels (AUC 0.3 to 0.6), but those labels disagree with
+    cardiologists on which rhythm is which. On the ECG Fragment Database's
+    cardiologist labels, ten published measures do separate them (AUC 0.95
+    on patients left out, eval/vf_vt_cardiologist.py): that second stage
+    names the alert in shadow mode (Naming, below).
 
     The quality gate does NOT silence it. Measured on this project's data,
     artifact-free criteria discarded about 60% of genuine VF windows: VF looks
@@ -129,11 +129,23 @@ ECG saving
     does the saving.
 
 Naming VF or VT (off: config.VFVT_NAMING_ENABLED)
-    From the beats of the last 10 s when ShockableNet fires: PVCs in a row
-    (3 or more) -> "VT"; the beat model ran and saw no beat at all -> "VF";
-    otherwise, or no beat-model output for that stretch -> "VF/VT". While off,
-    the alert stays "VF/VT" and the guess rides along with the recording
-    request (shadow mode) for comparison with the doctor's reading.
+    Each positive ShockableNet window can carry P(VT) from the namer
+    (models/vfvt_namer.py: ten published measures and a logistic regression
+    fitted on cardiologists' labels). When the alert fires, the windows that
+    confirmed it are read, each named on its own as the namer was evaluated:
+    "VT" at P(VT) of 0.9 or more, "VF" at 0.1 or less (config.VFVT_NAME_ZONE),
+    no name in between. The alert gets a name only if every one of them got
+    the same one; otherwise, or if any of them has no P(VT), it is "VF/VT".
+    On patients left out, that zone named 81 of 239 windows, 1 wrongly. An
+    alert is named wrongly only when all of its windows are, so per alert a
+    wrong name is no more likely than per window; how many alerts get a name
+    at all is for shadow mode to show. While off, the alert stays "VF/VT" and
+    the name rides with the recording request (shadow mode), to be compared
+    with the doctor's reading.
+
+    The beat rule (PVCs in a row in the last 10 s -> "VT", the beat model ran
+    and saw no beat -> "VF") is kept as evidence ("beats_guess") and never
+    names: on the same cardiologist windows it named 45, 8 wrongly.
 
 Lead-off
     4 lead-off windows in the last 6 raise one "check the patch" notice per
@@ -167,6 +179,7 @@ class DecisionConfig:
     ventricular_hold: tuple = ("fast_narrow",)
     rate_episode_end: int = 6             # windows without the finding that close an episode
     vfvt_naming: bool = C.VFVT_NAMING_ENABLED
+    vfvt_zone: tuple = tuple(C.VFVT_NAME_ZONE)   # P(VT) at or below: VF; at or above: VT
 
 
 @dataclass
@@ -246,6 +259,7 @@ class DecisionLayer:
         c = self.cfg
         self._shock = _Episode(c.shock_rule, c.shock_episode_end)
         self._shock_recent: deque = deque(maxlen=c.shock_rule[1])
+        self._shock_pvt: deque = deque(maxlen=c.shock_rule[1])   # P(VT) per window, None if negative
         self._af = _Episode(c.af_rule, c.af_episode_end)
         self._lead = _Episode(c.lead_off_rule, c.shock_episode_end)
         self._rate: dict = {}
@@ -281,7 +295,10 @@ class DecisionLayer:
 
     # ---------------------------------------------------------------- inputs
     def on_shockable(self, t: float, p_shockable: float, rate=None,
-                     usable: bool = True, lead_off: bool | None = None) -> list[Alert]:
+                     usable: bool = True, lead_off: bool | None = None,
+                     p_vt: float | None = None) -> list[Alert]:
+        """One ShockableNet window. p_vt: the namer's P(VT) for it, or None
+        when the namer did not run; read only when the window is positive."""
         out = []
         if self._lead.step(lead_off is True):
             out.append(Alert(t, "check_patch", "info", "device",
@@ -289,14 +306,17 @@ class DecisionLayer:
         silenced = lead_off is True or (self.cfg.gate_shockable_on_quality and not usable)
         positive = (not silenced) and p_shockable >= self.cfg.shock_threshold
         self._shock_recent.append(positive)
+        self._shock_pvt.append(_probability(p_vt) if positive else None)
         if self._shock.step(positive):
             bpm = getattr(rate, "bpm", float("nan")) if rate is not None else float("nan")
-            guess = self._vfvt_guess(t)
-            name = guess if self.cfg.vfvt_naming else "VF/VT"
-            out.append(Alert(t, name, "critical", "shockable", VFVT_DETAIL[name],
+            name, read = self._vfvt_name()
+            kind = name if self.cfg.vfvt_naming else "VF/VT"
+            out.append(Alert(t, kind, "critical", "shockable", VFVT_DETAIL[kind],
                              {"p_shockable": float(p_shockable),
                               "bpm": float(bpm) if np.isfinite(bpm) else None,
-                              "shadow_name": guess}))
+                              "shadow_name": name,
+                              "p_vt": read,
+                              "beats_guess": self._vfvt_guess(t)}))
         return self._emit(out)
 
     def on_rhythm(self, t: float, probs, usable: bool = True,
@@ -515,8 +535,24 @@ class DecisionLayer:
             self._vt_active = False
         return out
 
+    def _vfvt_name(self) -> tuple:
+        """The namer's name for the alert being raised, and the P(VT) it read.
+
+        The windows read are the positive ones since the episode's
+        confirmation last started (the last m at most): the ones that
+        confirmed this alert. Each is named on its own with the zone, the way
+        the namer was evaluated; the alert is named only when all agree.
+        """
+        lo, hi = self.cfg.vfvt_zone
+        n = len(self._shock.recent)
+        read = [p for p in list(self._shock_pvt)[-n:] if p is not None] if n else []
+        names = {"VT" if p >= hi else "VF" if p <= lo else "VF/VT" for p in read}
+        name = names.pop() if len(names) == 1 else "VF/VT"
+        return name, [p if np.isfinite(p) else None for p in read]
+
     def _vfvt_guess(self, t: float) -> str:
-        """VT / VF / VF/VT from the beats of the last few seconds."""
+        """The beat rule: VT / VF / VF/VT from the beats of the last few
+        seconds. Evidence only ("beats_guess"); the namer gives the name."""
         lb = C.VFVT_NAMING_LOOKBACK_SEC
         if self._last_beats_call < t - lb:          # no beat-model output for it
             return "VF/VT"
@@ -580,6 +616,15 @@ class DecisionLayer:
                 a.evidence["save_ecg"] = {"start": req.start, "end": req.end}
         self.alerts.extend(out)
         return out
+
+
+def _probability(p) -> float:
+    """p as a probability, or NaN when missing or outside 0 to 1 (no name)."""
+    try:
+        p = float(p)
+    except (TypeError, ValueError):
+        return float("nan")
+    return p if 0.0 <= p <= 1.0 else float("nan")
 
 
 # what each name of a ShockableNet alert tells the person

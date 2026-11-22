@@ -24,8 +24,8 @@ contains `requirements.txt`), as `python -m munji_ai.<module>`.
 |---|---|
 | `munji_ai/config.py` | Sampling rate, filters, windows, splits, rule thresholds, notification policy |
 | `munji_ai/data/` | Dataset registry, download, loading, preprocessing, patient-level splits, window caches, augmentation |
-| `munji_ai/features/` | Signal quality indices |
-| `munji_ai/models/` | Quality gate, beat segmenter, rhythm classifier (RhythmNet), shockable rhythm detector (ShockableNet) |
+| `munji_ai/features/` | Signal quality indices; the published measures that tell VF from VT |
+| `munji_ai/models/` | Quality gate, beat segmenter, rhythm classifier (RhythmNet), shockable rhythm detector (ShockableNet), VF-or-VT namer (logistic regression, no PyTorch) |
 | `munji_ai/rules/` | QRS detection and the rate engine (bradycardia, tachycardia, pause, asystole) |
 | `munji_ai/decision/` | Decision layer: combines gate, models and rules into findings and alerts |
 | `munji_ai/train/` | Training and patient-level cross-validation |
@@ -63,6 +63,7 @@ rate engine takes input in millivolts, never normalised.
    python -m munji_ai.train.train_rhythm --cache data/cache
    python -m munji_ai.train.train_shockable --cache data/cache
    python -m munji_ai.train.cross_validate --stage shockable
+   python -m munji_ai.train.train_vfvt_namer   # needs data/raw/ecg_fragments
    ```
 
 4. Evaluate rules and the decision layer
@@ -96,7 +97,10 @@ delivered pipeline:
 - `munji_ai/eval/vt_detector_check.py`
 
 VF/VT is one ShockableNet alert. Slow VT is caught by the beat-count rule
-in the decision layer.
+in the decision layer. A second stage (`munji_ai/models/vfvt_namer.py`,
+fitted on cardiologists' labels) names the alert VF or VT in shadow mode:
+the alert still says VF/VT and the name is kept with the ECG recording,
+until doctors' readings confirm it (`config.VFVT_NAMING_ENABLED`).
 
 ## Datasets
 

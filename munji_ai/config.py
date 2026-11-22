@@ -161,13 +161,22 @@ BEAT_DEDUP_SEC = 0.15
 ECG_SAVE_BEFORE_SEC = 30.0
 ECG_SAVE_AFTER_SEC = 30.0
 
-# Naming a ShockableNet alert VF or VT from the beat labels: VT when the beat
-# model sees organised PVCs in a row, VF when it sees no beats at all. Off
-# until validated on new patients (ECG Fragment Database, CUDB, VFDB); while
-# off the alert stays "VF/VT" and the guess is saved with the recording only
-# (shadow mode), to be compared with the doctor's reading later.
+# Naming a ShockableNet alert VF or VT. The name comes from the signal: P(VT)
+# of each positive ShockableNet window, from ten published measures and a
+# logistic regression (models/vfvt_namer.py, fitted by
+# train/train_vfvt_namer.py on cardiologists' labels). Each window that
+# confirmed the alert is named with this zone, and the alert only when all of
+# them agree (decision_layer). Out of fold by patient on 239
+# cardiologist-labelled VFDB windows (eval/vf_vt_cardiologist.py) the AUC was
+# 0.946 (0.89 to 0.99); with this zone 81 windows were named and 1 wrongly,
+# the rest left "VF/VT". The strictest zone tested, chosen for safety, not
+# tuned. The beat model's rule (PVCs in a row -> VT, no beat -> VF) named 45
+# with 8 wrong on the same windows, so it is kept only as evidence
+# ("beats_guess"). Off until shadow mode agrees with doctors' readings: while
+# off the alert stays "VF/VT" and the name rides with the recording only.
 VFVT_NAMING_ENABLED = False
-VFVT_NAMING_LOOKBACK_SEC = 10.0  # engineering: the VT detector's 10 s input
+VFVT_NAME_ZONE = (0.1, 0.9)      # P(VT) at or below: "VF"; at or above: "VT"
+VFVT_NAMING_LOOKBACK_SEC = 10.0  # the beat rule's look-back (beats_guess)
 
 # --------------------------------------------------------------- window labels
 # Fraction of a window that must fall inside a rhythm episode for the window to

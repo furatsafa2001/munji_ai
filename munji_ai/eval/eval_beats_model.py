@@ -3,7 +3,7 @@
     python -m munji_ai.eval.eval_beats_model --part vt          # sustained VT (CUDB, VFDB)
     python -m munji_ai.eval.eval_beats_model --part nsrdb       # false alerts per day
     python -m munji_ai.eval.eval_beats_model --part runs        # the 547 VT runs
-    python -m munji_ai.eval.eval_beats_model --part naming      # VF or VT naming (shadow)
+    python -m munji_ai.eval.eval_beats_model --part naming      # the beat rule's VF or VT guess
     python -m munji_ai.eval.eval_beats_model --part vt --no-gate
     python -m munji_ai.eval.eval_beats_model --part runs --oracle
 
@@ -36,7 +36,8 @@ nsrdb   healthy 24 h recordings: WCT alerts, NSVT, bigeminy and trigeminy per
         labels side by side. Only the annotated span is used.
 runs    data/cache/vt_runs.npz: NSVT and WCT per run, by length, expert labels
         and model side by side.
-naming  the VF-or-VT guess (config.VFVT_NAMING_ENABLED, off) against the
+naming  the beat rule's VF-or-VT guess (the alert's "beats_guess"; the name
+        itself now comes from models/vfvt_namer.py) against the
         rhythm annotation, for every VF and VT episode in CUDB and VFDB. A
         ShockableNet alert is reproduced NAMING_DELAY_SEC into the episode
         (4 positive windows of 2.5 s confirm it); the beat windows up to that
@@ -352,7 +353,7 @@ def part_naming(lab: Labeller, raw: Path, max_records: int, delay: float) -> Non
                 guess = None
                 for k in range(6):                       # 4 of 6 positive: fires at t_alert
                     for a in dl.on_shockable(t_alert - (3 - k) * 2.5 if k <= 3 else t_alert, 0.9):
-                        guess = a.evidence.get("shadow_name")
+                        guess = a.evidence.get("beats_guess")
                 truth = "VF" if label == "VF" else "VT"
                 rows.append({"label": label, "truth": truth, "guess": guess or "VF/VT",
                              "patient": rec.patient, "dur": (e - s) / fs})
@@ -383,9 +384,10 @@ def part_naming(lab: Labeller, raw: Path, max_records: int, delay: float) -> Non
                     for r in shock)
         print(f"\nShockableNet's territory (VF and VT 150+): {wrong} of {len(shock)} named wrongly "
               f"({wrong / len(shock):.0%}).")
-    print("Turn naming on (config.VFVT_NAMING_ENABLED) only if WRONG is near zero on new patients;"
-          "\n'VF/VT' is a safe abstention, the alert the app gives today. Slow VT rows are for"
-          "\ninformation: ShockableNet does not fire on them, the WCT alert covers them.")
+    print("The beat rule only rides along as evidence; the name comes from the namer"
+          "\n(models/vfvt_namer.py). 'VF/VT' is a safe abstention, the alert the app gives today."
+          "\nSlow VT rows are for information: ShockableNet does not fire on them, the WCT alert"
+          "\ncovers them.")
 
 
 def main(argv=None) -> int:

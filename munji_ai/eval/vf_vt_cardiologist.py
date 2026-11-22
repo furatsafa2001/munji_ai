@@ -32,7 +32,7 @@ Candidates, each scored out of fold by patient (GroupKFold, 5), logistic
 regression and random forest as in vf_vt_feasibility:
     rate         autocorrelation rate, regularity and "no rate"
                  (data/shockable_labels.acf_rates)
-    published    vfvt_common.features: complexity, entropies, dominant
+    published    features/vfvt.py: complexity, entropies, dominant
                  frequency and its concentration, periodicity, shape
     embeddings   ShockableNet's pooled features, from the fold model that
                  never saw the record (--shock, cross-validation folds)

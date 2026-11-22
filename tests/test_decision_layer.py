@@ -366,35 +366,88 @@ def main() -> int:
 
     print("\nNaming VF or VT (off by default: shadow mode)\n")
     check("naming is off in config", C.VFVT_NAMING_ENABLED is False)
+    check("the zone is the strictest one tested: VF at 0.1 or less, VT at 0.9 or more",
+          tuple(C.VFVT_NAME_ZONE) == (0.1, 0.9))
 
-    def shock(dl, t0):
+    def shock(dl, t0, p_vt=None, p=None):
+        """ShockableNet windows every 2.5 s: as many as p, else as p_vt when it
+        is a list (one value per window), else 6. P(shockable) 0.9 unless p."""
+        per_window = isinstance(p_vt, (list, tuple))
         out = []
-        for i in range(6):
-            out += dl.on_shockable(t0 + i * 2.5, 0.9, organised())
+        for i in range(len(p) if p is not None else len(p_vt) if per_window else 6):
+            pv = p_vt[i] if per_window else p_vt
+            out += dl.on_shockable(t0 + i * 2.5, 0.9 if p is None else p[i], organised(), p_vt=pv)
         return out
+
+    def named(out):
+        return [(a.kind, a.evidence.get("shadow_name")) for a in out]
+
+    dl = DecisionLayer()
+    out = shock(dl, 0.0, p_vt=0.95)
+    check("P(VT) 0.95 in every confirming window: alert still 'VF/VT', name 'VT' kept in shadow",
+          named(out) == [("VF/VT", "VT")] and dl.take_recording_requests()[0].shadow_name == "VT",
+          str(named(out)))
+    check("... with the 4 windows' P(VT) as evidence, read at the alert",
+          out and out[0].evidence["p_vt"] == [0.95] * 4, str(out[0].evidence.get("p_vt") if out else None))
+    dl = DecisionLayer()
+    check("P(VT) 0.05 in every window: 'VF' in shadow",
+          named(shock(dl, 0.0, p_vt=0.05)) == [("VF/VT", "VF")])
+    dl = DecisionLayer()
+    check("exactly 0.9 is named VT and exactly 0.1 VF (the zone's edges belong to the names)",
+          named(shock(dl, 0.0, p_vt=0.9)) == [("VF/VT", "VT")]
+          and named(shock(DecisionLayer(), 0.0, p_vt=0.1)) == [("VF/VT", "VF")])
+    for title, pvt in (("one confirming window inside the zone (0.5)", [0.95, 0.95, 0.95, 0.5]),
+                       ("windows that disagree (VT, VT, VF, VT)", [0.95, 0.95, 0.05, 0.95]),
+                       ("a confirming window without P(VT) (the namer did not run)",
+                        [0.95, 0.95, None, 0.95]),
+                       ("a P(VT) that is not a probability (NaN, 1.5)", [0.95, float("nan"), 1.5, 0.95]),
+                       ("no P(VT) at all", None)):
+        dl = DecisionLayer()
+        out = shock(dl, 0.0, p_vt=pvt)
+        check(f"{title}: no name, 'VF/VT'", named(out) == [("VF/VT", "VF/VT")], str(named(out)))
+    dl = DecisionLayer()
+    out = shock(dl, 0.0, p_vt=[0.95, 0.05, 0.95, 0.95, 0.95], p=[0.9, 0.1, 0.9, 0.9, 0.9])
+    check("a window under ShockableNet's threshold is not read: its P(VT) 0.05 changes nothing",
+          named(out) == [("VF/VT", "VT")] and out[0].evidence["p_vt"] == [0.95] * 4, str(named(out)))
+    dl = DecisionLayer()
+    first = shock(dl, 0.0, p_vt=0.95)
+    second = shock(dl, 15.0, p_vt=0.05, p=[0.1] * 12 + [0.9] * 4)
+    check("a new episode is named from its own windows only",
+          named(first) == [("VF/VT", "VT")] and named(second) == [("VF/VT", "VF")],
+          str(named(first) + named(second)))
 
     vt = stream([("N", 75, 10), ("PVC", 180, 60)])       # PVCs from 8 s to 27.7 s
     dl = DecisionLayer()
     feed(dl, vt, until=30.0)
     out = shock(dl, 22.5)                                # alert at 30 s
-
-    check("PVCs in a row + ShockableNet: alert still 'VF/VT', guess 'VT' saved in shadow",
-          kinds(out) == ["VF/VT"] and dl.take_recording_requests()[0].shadow_name == "VT",
-          str([(a.kind, a.evidence.get("shadow_name")) for a in out]))
+    check("the beat rule rides along as evidence: PVCs in a row -> beats_guess 'VT'",
+          out and out[0].evidence["beats_guess"] == "VT", str(out[0].evidence if out else None))
+    check("... and never names: without P(VT) the shadow name stays 'VF/VT'",
+          named(out) == [("VF/VT", "VF/VT")])
     dl = DecisionLayer()
     for te in (10.0, 20.0, 30.0):
         dl.on_beats(te, [], usable=False)
     out = shock(dl, 17.5)
-    check("beat model ran and saw no beats: shadow guess 'VF'",
-          out and out[0].evidence["shadow_name"] == "VF", str(out[0].evidence if out else None))
+    check("beat model ran and saw no beats: beats_guess 'VF'",
+          out and out[0].evidence["beats_guess"] == "VF", str(out[0].evidence if out else None))
     dl = DecisionLayer()
     out = shock(dl, 100.0)
-    check("no beat-model output at all: shadow guess 'VF/VT'",
-          out and out[0].evidence["shadow_name"] == "VF/VT")
+    check("no beat-model output at all: beats_guess 'VF/VT'",
+          out and out[0].evidence["beats_guess"] == "VF/VT")
+
+    dl = DecisionLayer(DecisionConfig(vfvt_naming=True))
+    out = shock(dl, 0.0, p_vt=0.95)
+    check("with naming on, all confirming windows at 0.95 are alerted as 'VT', with its own detail",
+          kinds(out) == ["VT"] and "tachycardia" in out[0].detail
+          and dl.take_recording_requests()[0].reason == "VT", str(kinds(out)))
+    dl = DecisionLayer(DecisionConfig(vfvt_naming=True))
+    check("with naming on, windows at 0.05 are alerted as 'VF'",
+          kinds(shock(dl, 0.0, p_vt=0.05)) == ["VF"])
     dl = DecisionLayer(DecisionConfig(vfvt_naming=True))
     feed(dl, vt, until=30.0)
-    out = shock(dl, 22.5)
-    check("with naming on, the same case is alerted as 'VT'", kinds(out) == ["VT"], str(kinds(out)))
+    out = shock(dl, 22.5, p_vt=[0.95, 0.95, 0.5, 0.95, 0.95, 0.95])
+    check("with naming on, the beat rule saying VT and one window in the zone: still 'VF/VT'",
+          kinds(out) == ["VF/VT"] and out[0].evidence["beats_guess"] == "VT", str(kinds(out)))
 
     print("\n" + ("ALL CHECKS PASSED" if ok else "FAILURES ABOVE"))
     return 0 if ok else 1

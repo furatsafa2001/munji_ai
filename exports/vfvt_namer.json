@@ -1,0 +1,195 @@
+{
+  "model": "vfvt_namer",
+  "exported": "2026-11-22",
+  "what": "P(VT) against VF, for a window ShockableNet calls shockable",
+  "input": {
+    "shape": [
+      1250
+    ],
+    "dtype": "float64",
+    "sample_rate_hz": 250,
+    "window_s": 5.0,
+    "what": "the window ShockableNet scores, after its preprocessing and normalisation (shockable_net.json)",
+    "run_on": "windows at or above ShockableNet's threshold only; the decision layer reads no other"
+  },
+  "standardise": "z = (x - mean(x)) / (sd(x) + 1e-8), sd with divisor n",
+  "features": [
+    {
+      "name": "lz_complexity",
+      "how": "b = 1 where z > median(z), else 0. Parse b left to right into phrases, each the shortest run from there that is not yet a phrase (the last one may repeat one). c = number of phrases; value c * log2(n) / n"
+    },
+    {
+      "name": "perm_entropy",
+      "how": "pattern of (z[i], z[i+2], z[i+4]) for every i: the stable argsort, coded as a0 + 3 a1 + 9 a2 (ties keep sample order); Shannon entropy of the pattern frequencies in bits, divided by log2(6)"
+    },
+    {
+      "name": "spectral_entropy",
+      "how": "Welch spectrum of z: periodic Hann window of 512 samples, overlap 256 (segments 0-511, 256-767, 512-1023; the rest unused), each segment's mean removed, one-sided, segments averaged. Bins f = k * 250 / 512 with 1 <= f <= 15 Hz; q = power / sum of power over those bins; value -sum(q * log2(q + 1e-12)) / log2(number of bins)"
+    },
+    {
+      "name": "dominant_hz",
+      "how": "f of the bin with the largest power among those (the first if tied)"
+    },
+    {
+      "name": "concentration",
+      "how": "sum of q over the bins within 0.5 Hz of dominant_hz"
+    },
+    {
+      "name": "periodicity",
+      "how": "r(k) = sum over i of z[i] * z[i+k], divided by n; the largest r(k) for k = 50 to 149 samples (0.2 to 0.6 s)"
+    },
+    {
+      "name": "kurtosis",
+      "how": "m4 / m2^2 - 3, central moments of z with divisor n (Fisher, biased)"
+    },
+    {
+      "name": "skewness",
+      "how": "m3 / m2^1.5, central moments of z with divisor n (biased)"
+    },
+    {
+      "name": "zero_crossings",
+      "how": "share of the n - 1 steps where sign(z) changes (sign(0) = 0)"
+    },
+    {
+      "name": "bpm_signal",
+      "how": "on x itself, not z: a = |x - median(x)|, s = 1.4826 * median(a); peaks of a as scipy.signal.find_peaks(a, distance=50, prominence=2 * s) finds them (plateaus at their middle, distance applied before prominence); value 60 / median of the peak-to-peak intervals in seconds. Missing (null) under 3 peaks or when s is 0"
+    }
+  ],
+  "pipeline": {
+    "features": [
+      "lz_complexity",
+      "perm_entropy",
+      "spectral_entropy",
+      "dominant_hz",
+      "concentration",
+      "periodicity",
+      "kurtosis",
+      "skewness",
+      "zero_crossings",
+      "bpm_signal"
+    ],
+    "fill": [
+      0.8039739612563711,
+      0.711565232079176,
+      0.5681236308194961,
+      3.738722541841004,
+      0.6753347295203576,
+      0.5596748284742461,
+      -0.3545401311181215,
+      -0.020869780522641906,
+      0.034852986992104165,
+      115.10418111118206
+    ],
+    "mean": [
+      0.8039739612563711,
+      0.711565232079176,
+      0.5681236308194961,
+      3.738722541841004,
+      0.6753347295203576,
+      0.5596748284742461,
+      -0.3545401311181215,
+      -0.020869780522641906,
+      0.034852986992104165,
+      115.10418111118229
+    ],
+    "scale": [
+      0.05712324392937118,
+      0.08288881941586611,
+      0.125495532947996,
+      1.2009782331229741,
+      0.17610394397669044,
+      0.23996647833809495,
+      1.0497435759036482,
+      0.3237698841736689,
+      0.010192005242649934,
+      44.224450233370625
+    ],
+    "coef": [
+      -0.4599333113908527,
+      -0.2755997869558741,
+      0.02260328704193244,
+      -1.1703039707069638,
+      0.0799971325737459,
+      0.2849742787721469,
+      0.37617386557615273,
+      -0.1073311952281069,
+      -0.8075346255977653,
+      0.18182913355924385
+    ],
+    "intercept": -0.8636235365952446,
+    "formula": "v = x, or fill where x is missing; z = (v - mean) / scale; p_vt = 1 / (1 + exp(-(intercept + sum(coef * z))))"
+  },
+  "output": {
+    "name": "p_vt",
+    "range": [
+      0,
+      1
+    ],
+    "meaning": "probability of VT rather than VF"
+  },
+  "decision": {
+    "zone": [
+      0.1,
+      0.9
+    ],
+    "rule": "each window that confirmed the alert is named VF at p_vt <= 0.1, VT at p_vt >= 0.9, else nothing; the alert is named only when all of them got the same name, else VF/VT",
+    "naming_enabled": false,
+    "meaning": "while naming is off the alert says VF/VT and the name is kept with the ECG recording only (shadow mode)"
+  },
+  "training": {
+    "labels": "ECG Fragment Database (PhysioNet ecg-fragment-high-risk-label), cardiologists of the Almazov Centre",
+    "signal": "our VFDB copy, each fragment found by its waveform (data/fragments.py); test-split records skipped",
+    "truth": {
+      "VF": [
+        "VF"
+      ],
+      "VT": [
+        "VTHR",
+        "VTLR",
+        "VTTDP"
+      ]
+    },
+    "never_learnt_from": [
+      "VFL"
+    ],
+    "windows": {
+      "VF": 162,
+      "VT": 77,
+      "VT_by_kind": {
+        "VTHR": 58,
+        "VTTDP": 19
+      },
+      "VFL_scored_only": 44
+    },
+    "records": 16,
+    "classifier": "mean imputation, standard scaling, logistic regression (C 0.1, balanced classes)",
+    "scikit_learn": "1.7.1"
+  },
+  "check": {
+    "method": "out of fold, GroupKFold 5 by patient",
+    "auc": 0.9463684463684464,
+    "auc_95ci": [
+      0.8891711385199241,
+      0.9879333169343405
+    ],
+    "bar": 0.85,
+    "zone": {
+      "windows": 239,
+      "named": 81,
+      "VF_named_VT": 0,
+      "VT_named_VF": 1
+    },
+    "flutter": {
+      "windows": 44,
+      "named_VT": 0,
+      "named_VF": 0
+    },
+    "note": "the estimate for new patients; the model fitted on everyone has no held-out score of its own"
+  },
+  "verification": {
+    "windows": 283,
+    "max_abs_diff_vs_scikit_learn": 0.0,
+    "bar": 1e-09,
+    "passed": true
+  }
+}

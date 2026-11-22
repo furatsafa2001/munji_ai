@@ -58,12 +58,14 @@ from ..data.preprocess import normalize
 from ..data.windows import dominant_label, rhythm_intervals, split_vt_by_rate
 from ..models.shockable_net import build
 from .false_alarm_rate import fold_of_records
-# The published measures and the classifier moved to vfvt_common (shared, no
-# PyTorch); kept importable from here for vt_detect_feasibility and the tests.
+# The published measures (features/vfvt.py) and the classifier come through
+# vfvt_common; kept importable from here for vt_detect_feasibility and the tests.
 from .vfvt_common import (FEATURE_NAMES, auc, features, lempel_ziv,  # noqa: F401
                           make_clf, permutation_entropy)
 
 FS = C.TARGET_FS
+
+
 def window_truth(rec, n: int) -> list:
     """Per 5 s window: 'VF', 'VT' (150 bpm or more) or None, by the annotation."""
     iv = split_vt_by_rate(rec, rhythm_intervals(rec))
