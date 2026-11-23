@@ -61,8 +61,13 @@ def main() -> int:
     dl = DecisionLayer()
     check("organised fast beats are still VF/VT, never guessed apart",
           kinds(run_shock(dl, [0.9] * 4, organised())) == ["VF/VT"])
+    under = round(C.SHOCKABLE_THRESHOLD - 0.01, 2)
     dl = DecisionLayer()
-    check("0.59 never fires", run_shock(dl, [0.59] * 20, chaotic()) == [])
+    check(f"{under}, just under the threshold, never fires",
+          run_shock(dl, [under] * 20, chaotic()) == [])
+    dl = DecisionLayer()
+    check(f"{C.SHOCKABLE_THRESHOLD}, the adopted threshold (config), fires",
+          kinds(run_shock(dl, [C.SHOCKABLE_THRESHOLD] * 4, chaotic())) == ["VF/VT"])
 
     print("\nLead-off\n")
     dl = DecisionLayer()

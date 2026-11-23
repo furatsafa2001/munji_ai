@@ -67,8 +67,8 @@ import torch
 from .. import config as C
 from ..config import CACHE_DIR, RAW_DIR, TARGET_FS
 from ..data.loader import load_record
-from ..data.windows import (SHOCKABLE, dominant_label, load_cache,
-                            rhythm_intervals, split_vt_by_rate)
+from ..data.shockable_labels import scoring_flags
+from ..data.windows import load_cache
 from ..models.shockable_net import build
 
 DEFAULT_DATASETS = ("nsrdb", "stdb", "edb", "fantasia")
@@ -133,25 +133,24 @@ def window_scores(model, signal: np.ndarray, device, batch: int = 2048) -> np.nd
 
 
 def truth_flags(rec, n: int) -> np.ndarray:
-    """True where the annotated rhythm makes the window genuinely shockable."""
-    iv = split_vt_by_rate(rec, rhythm_intervals(rec))
-    win, stride = C.window_samples("shockable"), C.stride_samples("shockable")
-    flags = np.zeros(n, dtype=bool)
-    if not iv:
-        return flags
-    for i in range(n):
-        lo = i * stride
-        lab = dominant_label(iv, lo, lo + win, C.SHOCKABLE_PURITY,
-                             excluded=C.SHOCKABLE_EXCLUDED)
-        flags[i] = lab in SHOCKABLE
-    return flags
+    """True where the annotated rhythm makes the window genuinely shockable:
+    VF or flutter of 200 uV or more, VT at 150 bpm or more measured on the
+    window itself, or polymorphic VT (data/shockable_labels.py)."""
+    return scoring_flags(rec, n)[0]
 
 
-def count_alarms(pred: np.ndarray, truth: np.ndarray, rule) -> dict:
+def count_alarms(pred: np.ndarray, truth: np.ndarray, rule, excluded=None) -> dict:
     """Alarms under N-of-M; a run of confirmed windows is one alarm.
 
     false   alarms whose confirming windows contain no annotated shockable one
-    true    alarms that do
+            (nor an intermediate one, when `excluded` is given)
+    true    alarms that do contain a shockable one
+    intermediate
+            alarms over an intermediate rhythm only (slow VT, fine VF;
+            `excluded`): AHA gives these rhythms no performance goal, so such
+            an alarm is neither true nor false, and is reported
+    inter_windows / inter_fired
+            intermediate windows, and how many of them an alarm covered
     episodes / caught / delays
             contiguous runs of shockable windows, whether an alarm fired while
             each was running, and how many windows after onset it fired
@@ -160,13 +159,23 @@ def count_alarms(pred: np.ndarray, truth: np.ndarray, rule) -> dict:
     csum = np.concatenate([[0], np.cumsum(pred)])
     idx = np.arange(len(pred))
     fired = (csum[idx + 1] - csum[np.maximum(0, idx - m + 1)]) >= n
-    out = {"false": 0, "true": 0, "episodes": 0, "caught": 0, "delays": [],
-           "sus_episodes": 0, "sus_caught": 0}
+    out = {"false": 0, "true": 0, "intermediate": 0, "episodes": 0, "caught": 0,
+           "delays": [], "sus_episodes": 0, "sus_caught": 0,
+           "inter_windows": 0, "inter_fired": 0}
+    if excluded is not None:
+        excluded = np.asarray(excluded, dtype=bool) & ~np.asarray(truth, dtype=bool)
+        out["inter_windows"] = int(excluded.sum())
+        out["inter_fired"] = int((fired & excluded).sum())
 
     for i in np.flatnonzero(fired):
         if i == 0 or not fired[i - 1]:
             lo = max(0, i - m + 1)
-            out["true" if truth[lo:i + 1].any() else "false"] += 1
+            if truth[lo:i + 1].any():
+                out["true"] += 1
+            elif excluded is not None and excluded[lo:i + 1].any():
+                out["intermediate"] += 1
+            else:
+                out["false"] += 1
 
     t = np.concatenate([[False], truth, [False]])
     starts = np.flatnonzero(~t[:-1] & t[1:])
@@ -260,7 +269,7 @@ def main(argv=None) -> int:
 
     hours = defaultdict(float)
     n_rec = defaultdict(int)
-    acc = defaultdict(lambda: {"false": 0, "true": 0, "episodes": 0,
+    acc = defaultdict(lambda: {"false": 0, "true": 0, "intermediate": 0, "episodes": 0,
                                "caught": 0, "delays": [],
                                "sus_episodes": 0, "sus_caught": 0})
     per_record = defaultdict(lambda: defaultdict(int))
@@ -277,7 +286,7 @@ def main(argv=None) -> int:
                 continue
             rec = load_record(ds, name, a.raw)
             s = window_scores(models[f], rec.signal, device)
-            truth = truth_flags(rec, len(s))
+            truth, inter = scoring_flags(rec, len(s))
             hours[ds] += len(rec.signal) / TARGET_FS / 3600
             n_rec[ds] += 1
 
@@ -293,9 +302,9 @@ def main(argv=None) -> int:
                 for cfg in configs:
                     pred = (s >= t) & ~veto[cfg]
                     for r in rules:
-                        c = count_alarms(pred, truth, r)
+                        c = count_alarms(pred, truth, r, excluded=inter)
                         k = acc[(ds, t, r, cfg)]
-                        for key in ("false", "true", "episodes", "caught",
+                        for key in ("false", "true", "intermediate", "episodes", "caught",
                                     "sus_episodes", "sus_caught"):
                             k[key] += c[key]
                         k["delays"] += c["delays"]
@@ -357,6 +366,13 @@ def main(argv=None) -> int:
     print("\n" + "=" * 66)
     print("  Per 24 h is the rate a patient would feel with the gate off.")
     print("  Alarms overlapping annotated VF or fast VT count as true, not false.")
+    inter = {(t, r): sum(acc[(d, t, r, None)]["intermediate"] for d in used)
+             for t in a.thresholds for r in rules}
+    if any(inter.values()):
+        t0_, r0_ = a.thresholds[0], rules[0]
+        print(f"  Alarms over intermediate rhythms only (slow VT, fine VF; AHA: no goal)"
+              f" are\n  neither: {inter[(t0_, r0_)]} at threshold {t0_:.2f},"
+              f" rule {r0_[0]}/{r0_[1]}.")
     if has_ep:
         print("  Delay is from episode onset to alarm, including the 5 s window.")
         print(f"  Sustained: annotated shockable for {SUSTAINED_S:g} s or more.")

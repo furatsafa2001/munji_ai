@@ -14,9 +14,10 @@ Caches are kept separate rather than merged: window lengths differ, label
 shapes differ, and merging would force loading 40 GB to train a gate that
 needs 2 GB.
 
-Every cache records the config hash it was built under. Change a filter cutoff
-or a sampling rate and the loader refuses stale caches instead of silently
-training on mismatched data.
+Every cache records the config hash it was built under: the hash of the config
+values its own stage reads. Change a filter cutoff or a sampling rate and the
+loader refuses stale caches instead of silently training on mismatched data.
+A setting only one stage reads invalidates that stage's cache and no other.
 """
 
 from __future__ import annotations
@@ -36,9 +37,24 @@ from .registry import get
 # --------------------------------------------------------------------- hashing
 
 
-def config_hash() -> str:
-    """Fingerprint of every config value a cache depends on."""
-    payload = json.dumps({
+# Config values only extract_beat reads. They are in the beat cache's
+# fingerprint and no other, so changing them invalidates the beat cache alone.
+BEAT_ONLY_KEYS = ("keep_all_ectopic", "max_ectopic")
+
+# The same for extract_shockable: the per-window label rules
+# (data/shockable_labels.py, config "Shockable labels, one per window").
+SHOCKABLE_ONLY_KEYS = ("shockable_labels",)
+STAGE_ONLY_KEYS = {"beat": BEAT_ONLY_KEYS, "shockable": SHOCKABLE_ONLY_KEYS}
+
+
+def config_hash(stage: str | None = None) -> str:
+    """Fingerprint of the config values a stage's cache depends on.
+
+    Values only one stage reads (STAGE_ONLY_KEYS) are left out of every other
+    stage's fingerprint, so a beat-only or shockable-only setting does not
+    invalidate the other caches. Without a stage, every value is included.
+    """
+    fields = {
         "fs": C.TARGET_FS,
         "model_band": C.MODEL_BAND,
         "mains": C.MAINS_HZ,
@@ -57,7 +73,23 @@ def config_hash() -> str:
         "quality_classes": sorted(C.QUALITY_CLASSES),
         "records_per_patient": C.MAX_RECORDS_PER_PATIENT,
         "quality_bands": augment.QUALITY_BANDS,
-    }, sort_keys=True)
+        "shockable_labels": {
+            "version": C.SHOCKABLE_LABELS,
+            "shockable": sorted(C.SHOCKABLE_WINDOW_RHYTHMS),
+            "purity": C.SHOCKABLE_WINDOW_PURITY,
+            "fine_vf_mv": C.FINE_VF_MAX_PTP_MV,
+            "rate_lag_sec": list(C.VT_RATE_LAG_SEC),
+            "rate_near_top": C.VT_RATE_NEAR_TOP,
+            "rate_min_regularity": C.VT_RATE_MIN_REGULARITY,
+            "excluded": sorted(C.SHOCKABLE_WINDOW_EXCLUDED),
+        },
+    }
+    if stage is not None:
+        for owner, keys in STAGE_ONLY_KEYS.items():
+            if owner != stage:
+                for key in keys:
+                    del fields[key]
+    payload = json.dumps(fields, sort_keys=True)
     return hashlib.sha256(payload.encode()).hexdigest()[:12]
 
 
@@ -237,7 +269,13 @@ def _episode_bpm(sig, fs: int):
 
 
 def split_vt_by_rate(rec: Record, intervals):
-    """Relabel VT episodes as VT_FAST or VT_SLOW using the measured rate."""
+    """Relabel VT episodes as VT_FAST or VT_SLOW using the measured rate.
+
+    One rate per episode, from _episode_bpm, which reads smooth or small VT
+    far too slow (experiments/vt_rate_check.py). The shockable stage no longer
+    uses it: it labels every window on its own (data/shockable_labels.py).
+    Kept for the VT experiments and evaluations that group whole episodes.
+    """
     out = []
     for s, e, lab in intervals:
         if lab != "VT":
@@ -254,16 +292,23 @@ def split_vt_by_rate(rec: Record, intervals):
 
 
 def extract_shockable(rec: Record, rng, cap: int):
-    iv = split_vt_by_rate(rec, rhythm_intervals(rec))
+    """Shockable and not-shockable windows, labelled one window at a time by
+    the AHA framework as Figuera et al. 2016 apply it (data/shockable_labels.py):
+    intermediate rhythms (slow VT, fine VF), ambiguity markers and rhythm
+    transitions are left out; polymorphic (irregular) VT is shockable."""
+    from .shockable_labels import label_windows, window_class
+
+    iv = rhythm_intervals(rec)
     if not iv:
         return [], [], []
+    frames = list(_frames(rec, "shockable"))
+    labels = label_windows(rec.signal, rec.fs, iv, [lo for lo, _ in frames],
+                           C.window_samples("shockable"))
     pos, neg = [], []
-    for lo, hi in _frames(rec, "shockable"):
-        lab = dominant_label(iv, lo, hi, C.SHOCKABLE_PURITY,
-                             excluded=C.SHOCKABLE_EXCLUDED)
-        if lab is None:
+    for (lo, hi), lab in zip(frames, labels):
+        cls = window_class(lab)
+        if cls is None:
             continue
-        cls = "shockable" if lab in SHOCKABLE else "not_shockable"
         (pos if cls == "shockable" else neg).append((lo, hi, cls))
 
     rng.shuffle(neg)
@@ -410,7 +455,7 @@ def build_stage(stage: str, manifest: dict, out_dir: Path | None = None,
             path, X=Xa, y=Ya,
             dataset=np.asarray(meta_ds), patient=np.asarray(meta_pat),
             record=np.asarray(meta_rec), offset=np.asarray(meta_off, dtype=np.int64),
-            cfg_hash=np.asarray(config_hash()), stage=np.asarray(stage),
+            cfg_hash=np.asarray(config_hash(stage)), stage=np.asarray(stage),
         )
         written[split] = path
         if verbose:
@@ -428,9 +473,12 @@ def load_cache(stage: str, split: str, cache_dir: Path | None = None,
     if not p.exists():
         raise FileNotFoundError(f"{p} missing — run build_stage({stage!r}) first")
     d = np.load(p, allow_pickle=False)
-    if check_hash and str(d["cfg_hash"]) != config_hash():
+    stored = str(d["cfg_hash"])
+    # The stage's own fingerprint, or the all-values one caches built before
+    # the split carry: matching every value means matching the stage's too.
+    if check_hash and stored not in (config_hash(stage), config_hash()):
         raise RuntimeError(
-            f"{p.name} was built under config {str(d['cfg_hash'])}, current is "
-            f"{config_hash()}. Rebuild the cache — preprocessing changed."
+            f"{p.name} was built under config {stored}, current is "
+            f"{config_hash(stage)}. Rebuild the cache — preprocessing changed."
         )
     return {k: d[k] for k in d.files}

@@ -39,7 +39,7 @@ def main(argv=None) -> int:
     if not have:
         print(f"no datasets under {a.raw} — run download.py first")
         return 1
-    print(f"config hash : {config_hash()}")
+    print("config hash : " + "  ".join(f"{s} {config_hash(s)}" for s in STAGES))
     print(f"downloaded  : {', '.join(have)}\n")
 
     split_file = Path(C.SPLIT_DIR) / "splits.json"

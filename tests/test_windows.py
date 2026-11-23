@@ -154,6 +154,61 @@ def main():
     check("hash changes when preprocessing changes", h1 != h2, f"{h1} -> {h2}")
     check("hash restored when config restored", W.config_hash() == h1)
 
+    print("\n9b. each stage's hash covers only what that stage reads")
+    stages = ("quality", "beat", "rhythm", "shockable")
+    before = {s: W.config_hash(s) for s in stages}
+    old_cap = C.BEAT_MAX_ECTOPIC_PER_PATIENT
+    C.BEAT_MAX_ECTOPIC_PER_PATIENT = old_cap + 1
+    after = {s: W.config_hash(s) for s in stages}
+    C.BEAT_MAX_ECTOPIC_PER_PATIENT = old_cap
+    check("a beat-only setting changes the beat hash",
+          before["beat"] != after["beat"])
+    check("... and no other stage's",
+          all(before[s] == after[s] for s in stages if s != "beat"))
+    old_reg = C.VT_RATE_MIN_REGULARITY
+    C.VT_RATE_MIN_REGULARITY = old_reg + 0.1
+    shock = {s: W.config_hash(s) for s in stages}
+    C.VT_RATE_MIN_REGULARITY = old_reg
+    check("a shockable-only setting (label rules) changes the shockable hash",
+          before["shockable"] != shock["shockable"])
+    check("... and no other stage's",
+          all(before[s] == shock[s] for s in stages if s != "shockable"))
+    C.MODEL_BAND = (0.7, 40.0)
+    shared = {s: W.config_hash(s) for s in stages}
+    C.MODEL_BAND = old
+    check("a shared setting changes every stage's hash",
+          all(before[s] != shared[s] for s in stages))
+
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        def stamp(stage, h):
+            np.savez(Path(tmp) / f"{stage}_val.npz", X=np.zeros((1, 4)),
+                     y=np.array(["NSR"]), cfg_hash=np.asarray(h))
+
+        def loads(stage):
+            try:
+                W.load_cache(stage, "val", Path(tmp))
+                return True
+            except RuntimeError:
+                return False
+
+        stamp("rhythm", W.config_hash("rhythm"))
+        check("a rhythm cache with the rhythm hash loads", loads("rhythm"))
+        stamp("rhythm", W.config_hash())
+        check("a rhythm cache with the all-values hash still loads", loads("rhythm"))
+        stamp("rhythm", after["rhythm"])
+        check("a rhythm cache built under another beat-only setting loads", loads("rhythm"))
+        stamp("rhythm", shared["rhythm"])
+        check("a rhythm cache from another filter band is refused", not loads("rhythm"))
+        stamp("beat", W.config_hash("rhythm"))
+        check("a beat cache without the beat settings is refused", not loads("beat"))
+        stamp("beat", after["beat"])
+        check("a beat cache from another beat setting is refused", not loads("beat"))
+        stamp("shockable", W.config_hash("shockable"))
+        check("a shockable cache with the shockable hash loads", loads("shockable"))
+        stamp("shockable", W.config_hash("rhythm"))
+        check("a shockable cache built before the label rules is refused", not loads("shockable"))
+
     print("\n10. memory estimate at configured caps")
     for stage in ("quality", "beat", "rhythm", "shockable"):
         n = C.MAX_WINDOWS_PER_STAGE[stage]

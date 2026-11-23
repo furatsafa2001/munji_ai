@@ -58,13 +58,16 @@ from ..config import CACHE_DIR, RAW_DIR, TARGET_FS
 from ..data.loader import load_record
 from ..data.windows import load_cache
 from .aha_protocol import quality, rhythm_and_purity
+from ..data.shockable_labels import scoring_flags
 from .false_alarm_rate import (SUSTAINED_S, count_alarms, fold_of_records,
-                               load_fold_models, truth_flags, window_scores)
+                               load_fold_models, window_scores)
 
 POS = "shockable"
 STEP = C.WINDOW_STRIDE_SEC["shockable"]
 WIN_S = C.WINDOW_SEC["shockable"]
-SWEEP = (0.50, 0.55, 0.60, 0.65, 0.70)
+# Every 0.02 around the operating point: the range that keeps every sustained
+# episode with few false alarms is narrow (config.SHOCKABLE_THRESHOLD).
+SWEEP = (0.50, 0.52, 0.54, 0.56, 0.58, 0.60, 0.65, 0.70)
 
 # Published targets each figure answers to. Values only from the sources named.
 AHA = "AHA AED performance goals (Kerber et al., Circulation 1997)"
@@ -212,18 +215,21 @@ def continuous_section(models, folds_map, datasets, thresholds, rule, raw, devic
                 continue
             rec = load_record(ds, name, raw)
             sc = window_scores(models[f], rec.signal, device)
-            truth = truth_flags(rec, len(sc))
+            truth, inter = scoring_flags(rec, len(sc))
+            inter &= ~truth
             hours = len(rec.signal) / TARGET_FS / 3600
             for t in thresholds:
                 pred = sc >= t
-                c = count_alarms(pred, truth, rule)
+                c = count_alarms(pred, truth, rule, excluded=inter)
                 fired = fired_mask(pred, rule)
                 a = acc[t][ds]
                 a["hours"] += hours
-                for k in ("false", "true", "episodes", "caught", "sus_episodes", "sus_caught"):
+                for k in ("false", "true", "intermediate", "episodes", "caught",
+                          "sus_episodes", "sus_caught", "inter_windows", "inter_fired"):
                     a[k] += c[k]
                 a["truth_windows"] += truth.sum()
-                a["fired_windows"] += fired.sum()
+                # fired over an intermediate rhythm: neither right nor wrong (AHA)
+                a["fired_windows"] += (fired & ~inter).sum()
                 a["overlap_windows"] += (fired & truth).sum()
                 delays[t] += [d for d in c["delays"]]
             if j % 10 == 0 or j == len(keys):
@@ -238,7 +244,10 @@ def ec57(a: dict) -> dict:
             "DSe": a["overlap_windows"] / max(a["truth_windows"], 1),
             "D+P": a["overlap_windows"] / max(a["fired_windows"], 1),
             "sustained_episodes": int(a["sus_episodes"]),
-            "sustained_ESe": a["sus_caught"] / max(a["sus_episodes"], 1)}
+            "sustained_ESe": a["sus_caught"] / max(a["sus_episodes"], 1),
+            "intermediate_alarms": int(a.get("intermediate", 0)),
+            "intermediate_minutes": a.get("inter_windows", 0) * STEP / 60.0,
+            "intermediate_covered": a.get("inter_fired", 0) / max(a.get("inter_windows", 0), 1)}
 
 
 # --------------------------------------------------------------------- figures
@@ -405,9 +414,16 @@ def summary_md(m: dict, figs: list[str]) -> str:
               f"| duration positive predictivity (D+P) | {e['D+P']:.3f} |",
               f"| sustained episodes (30 s or more) detected | {e['sustained_ESe']:.3f} "
               f"({e['sustained_episodes']} episodes) |",
-              f"| median delay, onset to alarm | {m.get('median_delay_s', float('nan')):.0f} s |", "",
+              f"| median delay, onset to alarm | {m.get('median_delay_s', float('nan')):.0f} s |",
+              f"| intermediate rhythms (slow VT, fine VF): minutes, "
+              f"share under an alarm | {e['intermediate_minutes']:.0f} min, "
+              f"{e['intermediate_covered']:.0%} |",
+              f"| alarms over an intermediate rhythm only (neither true nor false) | "
+              f"{e['intermediate_alarms']} |", "",
               "E+P on these recordings counts alarms during the quiet stretches of "
-              "arrests as false, so it understates precision in a home setting.", ""]
+              "arrests as false, so it understates precision in a home setting. "
+              "Intermediate rhythms follow the AHA framework (Kerber 1997): no goal, "
+              "reported only; labels per window, data/shockable_labels.py.", ""]
     if "days" in m:
         L += ["## False alarms on full days (gate off, upper bound)", "",
               "| source | hours | false alarms | per 24 h |", "|---|---|---|---|"]
@@ -493,7 +509,7 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--models", type=Path, required=True)
-    ap.add_argument("--threshold", type=float, default=0.65)
+    ap.add_argument("--threshold", type=float, default=C.SHOCKABLE_THRESHOLD)
     ap.add_argument("--out", type=Path, default=Path("reports") / "shockable")
     ap.add_argument("--cache", type=Path, default=CACHE_DIR)
     ap.add_argument("--raw", type=Path, default=RAW_DIR)

@@ -25,7 +25,9 @@ Sources
 Neither is used in any shockable evaluation, so the false-alarm measurement on
 nsrdb stays an external test. Patients the project split assigns to test are
 skipped. Any window annotated shockable (VF, or VT at 150 bpm or more) is
-dropped, so every kept window is a true negative.
+dropped, so every kept window is a true negative (polymorphic VT counts as
+shockable), and so is any intermediate one (slow VT, fine VF;
+data/shockable_labels.py), which the cache trains neither way.
 
 Long runs
 ---------
@@ -87,7 +89,8 @@ def _normalize(w: np.ndarray) -> np.ndarray:
 
 def mine_patient(model, dataset, pid, recs, raw, device, hard_thr, k_hard, k_rand, rng):
     """Top-k hard and a random sample for one patient, streaming over records."""
-    from ..eval.false_alarm_rate import truth_flags, window_scores
+    from ..eval.false_alarm_rate import window_scores
+    from .shockable_labels import scoring_flags
 
     win, stride = C.window_samples("shockable"), C.stride_samples("shockable")
     hard: list = []            # (score, window, record, offset)
@@ -100,7 +103,8 @@ def mine_patient(model, dataset, pid, recs, raw, device, hard_thr, k_hard, k_ran
             print(f"    skip {name}: {e}")
             continue
         s = window_scores(model, rec.signal, device)
-        keep = ~truth_flags(rec, len(s))
+        shock, inter = scoring_flags(rec, len(s))
+        keep = ~shock & ~inter
         stats["hours"] += len(rec.signal) / TARGET_FS / 3600
         stats["windows"] += int(keep.sum())
         h = np.flatnonzero(keep & (s >= hard_thr))

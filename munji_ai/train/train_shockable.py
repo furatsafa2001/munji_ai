@@ -37,7 +37,7 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader, TensorDataset
 
-from ..config import CACHE_DIR, CONFIRMATION, SHOCKABLE_CLASSES
+from ..config import CACHE_DIR, CONFIRMATION, SHOCKABLE_CLASSES, SHOCKABLE_THRESHOLD
 from ..data.windows import load_cache
 from ..eval.metrics import macro_f1, report
 from ..models.shockable_net import (SENSITIVITY_FLOOR, MissPenaltyLoss, build,
@@ -152,9 +152,9 @@ def main(argv=None) -> int:
     ap.add_argument("--extra-negatives", type=Path, default=None,
                     help=".npz of extra negative windows for training only "
                          "(data/hard_negatives.py)")
-    ap.add_argument("--threshold", type=float, default=0.65,
-                    help="operating threshold on P(shockable), validated on full "
-                         "days with eval/false_alarm_rate.py")
+    ap.add_argument("--threshold", type=float, default=SHOCKABLE_THRESHOLD,
+                    help="operating threshold on P(shockable), recorded in the "
+                         "checkpoint (default: config.SHOCKABLE_THRESHOLD)")
     ap.add_argument("--device", default="auto")
     ap.add_argument("--seed", type=int, default=0)
     a = ap.parse_args(argv)
