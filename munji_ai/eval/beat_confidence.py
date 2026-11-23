@@ -63,12 +63,13 @@ NAME = {I_BG: "missed", I_N: "N", I_PAC: "PAC", I_PVC: "PVC"}
 
 
 def regions(mask) -> list:
-    """[(start, end, class index)] for each contiguous non-background run."""
+    """[(start, end, class index)] for each contiguous non-background run.
+    Ignore-marked samples (beats in no class) count as background."""
     m = np.asarray(mask).astype(int).ravel()
     out, i, n = [], 0, m.size
     while i < n:
         c = m[i]
-        if c == I_BG:
+        if c == I_BG or c == C.BEAT_IGNORE_ID:
             i += 1
             continue
         j = i

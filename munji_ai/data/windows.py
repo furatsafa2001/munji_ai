@@ -39,7 +39,7 @@ from .registry import get
 
 # Config values only extract_beat reads. They are in the beat cache's
 # fingerprint and no other, so changing them invalidates the beat cache alone.
-BEAT_ONLY_KEYS = ("keep_all_ectopic", "max_ectopic")
+BEAT_ONLY_KEYS = ("keep_all_ectopic", "max_ectopic", "beat_ignore")
 
 # The same for extract_shockable: the per-window label rules
 # (data/shockable_labels.py, config "Shockable labels, one per window").
@@ -64,6 +64,9 @@ def config_hash(stage: str | None = None) -> str:
         "qrs": C.QRS_HALFWIDTH_MS,
         "keep_all_ectopic": getattr(C, "BEAT_KEEP_ALL_ECTOPIC", False),
         "max_ectopic": getattr(C, "BEAT_MAX_ECTOPIC_PER_PATIENT", 0),
+        "beat_ignore": {"id": C.BEAT_IGNORE_ID,
+                        "symbols": sorted(C.BEAT_IGNORE_SYMBOLS),
+                        "halfwidth_ms": C.BEAT_IGNORE_HALFWIDTH_MS},
         "beat_classes": C.BEAT_CLASSES,
         "purity": [C.RHYTHM_PURITY, C.SHOCKABLE_PURITY],
         "shockable_rhythms": sorted(C.SHOCKABLE_RHYTHMS),
@@ -115,6 +118,24 @@ def paint_mask(length: int, beat_idx: np.ndarray, beat_cls: np.ndarray,
         cid = C.BEAT_CLASS_ID[cls]
         region = mask[lo:hi]
         mask[lo:hi] = np.where(region == 0, cid, np.maximum(region, cid))
+    return mask
+
+
+def paint_ignore(mask: np.ndarray, ignore_idx: np.ndarray,
+                 fs: int = C.TARGET_FS) -> np.ndarray:
+    """Mark real beats outside the three classes as ignore, on background only.
+
+    A labelled beat's region always wins over an ignore region: where the two
+    meet, the samples belong to the beat the annotator classified.
+    """
+    half = int(round(C.BEAT_IGNORE_HALFWIDTH_MS * fs / 1000.0))
+    n = len(mask)
+    for idx in np.asarray(ignore_idx, dtype=np.int64):
+        lo, hi = max(int(idx) - half, 0), min(int(idx) + half + 1, n)
+        if hi <= lo:
+            continue
+        region = mask[lo:hi]
+        region[region == 0] = C.BEAT_IGNORE_ID
     return mask
 
 
@@ -206,10 +227,12 @@ def extract_beat(rec: Record, rng, cap: int):
         rng.shuffle(chosen)
         chosen = chosen[:cap]
 
+    ign = np.asarray(getattr(rec, "ignore_samples", np.zeros(0)), dtype=np.int64)
     X, Y, M = [], [], []
     for lo, hi, rel, wcls in chosen:
         X.append(pp.normalize(rec.signal[lo:hi]))
-        Y.append(paint_mask(hi - lo, rel, wcls))
+        m = paint_mask(hi - lo, rel, wcls)
+        Y.append(paint_ignore(m, ign[(ign >= lo) & (ign < hi)] - lo))
         M.append(lo)
     return X, Y, M
 

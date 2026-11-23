@@ -134,6 +134,9 @@ def main(argv=None) -> int:
 
     rows = []
     for x, y_true, y_pred in zip(X, Y, P):
+        # Ignore-marked samples are beats in no class; beats_from_mask reads
+        # class ids only, so they are passed as background.
+        y_true = np.where(np.asarray(y_true) == C.BEAT_IGNORE_ID, 0, y_true)
         be = beats_from_mask(y_true, 0.0, FS)
         bm = beats_from_mask(y_pred, 0.0, FS)
         n_e, n_m = len(be), len(bm)

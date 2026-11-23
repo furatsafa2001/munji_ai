@@ -25,6 +25,7 @@ missing a 140 ms complex costs 35 samples out of 5000.
 from __future__ import annotations
 
 import argparse
+import os
 import time
 from pathlib import Path
 
@@ -32,7 +33,7 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader, TensorDataset
 
-from ..config import BEAT_CLASSES, CACHE_DIR, TARGET_FS
+from ..config import BEAT_CLASSES, BEAT_IGNORE_ID, CACHE_DIR, TARGET_FS
 from ..data.windows import load_cache
 from ..models.beat_segmenter import (SegmentationLoss, build,
                                      class_weights_from_masks)
@@ -60,13 +61,14 @@ def mask_to_events(mask: np.ndarray) -> list[tuple[int, str]]:
 
     The mask marks a region around each beat, so a beat is a run of identical
     non-zero labels. Taking the centre gives a position comparable to an
-    annotated R-peak.
+    annotated R-peak. Ignore-marked samples (config.BEAT_IGNORE_ID) are read
+    as background: they are beats nobody classified, not events to score.
     """
     out = []
     i, n = 0, len(mask)
     while i < n:
         c = int(mask[i])
-        if c == 0:
+        if c == 0 or c == BEAT_IGNORE_ID:
             i += 1
             continue
         j = i
@@ -83,6 +85,10 @@ def beat_scores(true_masks: np.ndarray, pred_masks: np.ndarray,
 
     Greedy matching matters: without it, several predicted fragments of one
     beat all match the same annotation and precision is overstated.
+
+    A predicted beat centred on an ignore-marked sample sits on a real complex
+    the annotator put in no class (paced, fusion, unclassifiable). It is
+    neither a hit nor a false beat, so it is dropped before matching.
     """
     tol = MATCH_TOLERANCE_MS * fs / 1000.0
     tp = {c: 0 for c in EVENT_CLASSES}
@@ -92,6 +98,7 @@ def beat_scores(true_masks: np.ndarray, pred_masks: np.ndarray,
 
     for tm, pm in zip(true_masks, pred_masks):
         te, pe = mask_to_events(tm), mask_to_events(pm)
+        pe = [(p, c) for p, c in pe if int(tm[p]) != BEAT_IGNORE_ID]
         used = [False] * len(pe)
 
         for pos, cls in te:
@@ -136,8 +143,11 @@ def beat_scores(true_masks: np.ndarray, pred_masks: np.ndarray,
 
 
 def sample_macro_f1(true_masks: np.ndarray, pred_masks: np.ndarray) -> float:
-    """Macro F1 over beat classes only — background excluded on purpose."""
-    t, p = true_masks.ravel(), pred_masks.ravel()
+    """Macro F1 over beat classes only — background excluded on purpose.
+    Ignore-marked samples are left out of every count."""
+    t, p = np.asarray(true_masks).ravel(), np.asarray(pred_masks).ravel()
+    keep = t != BEAT_IGNORE_ID
+    t, p = t[keep], p[keep]
     f1s = []
     for c in EVENT_CLASSES:
         i = BEAT_IDS[c]
@@ -148,6 +158,18 @@ def sample_macro_f1(true_masks: np.ndarray, pred_masks: np.ndarray) -> float:
             continue
         f1s.append(2 * tp / (2 * tp + fp + fn) if (2 * tp + fp + fn) else 0.0)
     return float(np.mean(f1s)) if f1s else 0.0
+
+
+def save_checkpoint(path: Path, state: dict, meta: dict) -> None:
+    """Write the checkpoint atomically.
+
+    It goes to a temporary file first and is renamed over the target only once
+    complete, so a run stopped mid-write leaves the previous best intact rather
+    than a truncated file.
+    """
+    tmp = path.with_name(path.name + ".tmp")
+    torch.save({"state_dict": state, **meta}, tmp)
+    os.replace(tmp, path)
 
 
 @torch.no_grad()
@@ -180,7 +202,19 @@ def main(argv=None) -> int:
     ap.add_argument("--dice", type=float, default=0.5)
     ap.add_argument("--device", default="auto")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--overwrite", action="store_true",
+                    help="replace an existing checkpoint in --out")
     a = ap.parse_args(argv)
+
+    # The best checkpoint is written as soon as it improves, so an existing
+    # file would be overwritten by epoch 1 of a new run. checkpoints/ holds the
+    # adopted model; a new run goes to its own folder unless asked otherwise.
+    ckpt = a.out / "beat_segmenter.pt"
+    if ckpt.exists() and not a.overwrite:
+        print(f"{ckpt} already exists. Use --out for a new run "
+              f"(e.g. --out checkpoints/v3), or --overwrite to replace it.")
+        return 1
+    a.out.mkdir(parents=True, exist_ok=True)
 
     torch.manual_seed(a.seed)
     np.random.seed(a.seed)
@@ -199,8 +233,9 @@ def main(argv=None) -> int:
     Yva = torch.from_numpy(np.asarray(va["y"], dtype=np.int64))
     yva_np = np.asarray(va["y"])
 
-    counts = {c: int((np.asarray(tr["y"]) == i).sum())
-              for i, c in enumerate(BEAT_CLASSES)}
+    ytr = np.asarray(tr["y"])
+    counts = {c: int((ytr == i).sum()) for i, c in enumerate(BEAT_CLASSES)}
+    n_ignored = int((ytr == BEAT_IGNORE_ID).sum())
     total = sum(counts.values())
     print(f"device      {device}")
     print(f"train       {len(Xtr):,} windows, "
@@ -208,7 +243,8 @@ def main(argv=None) -> int:
     print(f"val         {len(Xva):,} windows, "
           f"{len(set(va['patient'].astype(str))):,} patients")
     print("mask mix    " + "  ".join(f"{c} {counts[c] / total:.1%}"
-                                     for c in BEAT_CLASSES))
+                                     for c in BEAT_CLASSES)
+          + f"   (ignored: {n_ignored / max(total + n_ignored, 1):.2%} of samples)")
 
     model = build().to(device)
     w = class_weights_from_masks(tr["y"]).to(device)
@@ -256,7 +292,13 @@ def main(argv=None) -> int:
             best, best_ep = b_f1, ep
             best_state = {k: v.detach().cpu().clone()
                           for k, v in model.state_dict().items()}
-            mark = " *"
+            # Written now, not after the loop: an interrupted run used to lose
+            # every epoch, because the best model lived only in memory.
+            save_checkpoint(ckpt, best_state, {
+                "classes": list(BEAT_CLASSES), "val_beat_f1": best,
+                "epoch": best_ep, "cache_hash": str(tr["cfg_hash"]),
+                "ignore_id": BEAT_IGNORE_ID})
+            mark = " * saved"
 
         secs = f"   {time.time() - t0:.0f}s/epoch" if ep == 1 else ""
         print(f"{ep:>5}{tot / len(train_loader):>9.4f}{s_f1:>11.3f}"
@@ -270,11 +312,8 @@ def main(argv=None) -> int:
         print("\nnothing to save")
         return 1
 
+    # Already on disk, written when it was found; reload it for the report.
     model.load_state_dict(best_state)
-    a.out.mkdir(parents=True, exist_ok=True)
-    ckpt = a.out / "beat_segmenter.pt"
-    torch.save({"state_dict": best_state, "classes": list(BEAT_CLASSES),
-                "val_beat_f1": best, "epoch": best_ep}, ckpt)
 
     pred = predict(model, val_loader, device)
     bs = beat_scores(yva_np, pred)

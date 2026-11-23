@@ -118,6 +118,44 @@ def main():
     check("ectopic-bearing windows prioritised", ect / len(Y) > 0.7,
           f"{ect}/{len(Y)} = {ect / len(Y):.0%}")
 
+    print("\n5b. beats in no class are marked ignore, not background")
+    ig = C.BEAT_IGNORE_ID
+    half = int(round(C.BEAT_IGNORE_HALFWIDTH_MS * 250 / 1000.0))
+    m0 = W.paint_mask(2000, np.array([500, 1000]), np.array(["N", "PVC"]))
+    m1 = W.paint_ignore(m0.copy(), np.array([1500, 1030]))
+    check("an unclassified beat on background is marked ignore",
+          int((m1[1500 - half:1500 + half + 1] == ig).sum()) == 2 * half + 1,
+          f"{int((m1 == ig).sum())} ignore samples")
+    check("a classified beat's samples are never overwritten",
+          np.array_equal(m1[m0 != 0], m0[m0 != 0]))
+    check("next to a classified beat, ignore takes only background",
+          set(np.unique(m1[1030 - half:1030 + half + 1]).tolist())
+          <= {0, C.BEAT_CLASS_ID["PVC"], ig})
+    check("no ignore id without ignore beats", not (np.concatenate(Y) == ig).any())
+
+    # Every fifth normal beat becomes a fusion beat: out of beat_samples, into
+    # ignore_samples, as load_record does with an 'F' annotation.
+    rec_f = make_record(seconds=300, af_from=150)
+    fus = np.array([s == "N" and i % 5 == 0 for i, s in enumerate(rec_f.beat_symbols)])
+    rec_f.ignore_samples = rec_f.beat_samples[fus]
+    rec_f.beat_samples, rec_f.beat_symbols = rec_f.beat_samples[~fus], rec_f.beat_symbols[~fus]
+    Xf, Yf, offf = W.extract_beat(rec_f, np.random.default_rng(0), cap=150)
+    stf = np.concatenate(Yf)
+    check("extract_beat marks fusion beats ignore in the cache", (stf == ig).any(),
+          f"{(stf == ig).mean():.2%} of samples, {int(fus.sum())} beats")
+    far = 0
+    for m, lo in zip(Yf, offf):
+        pos = np.flatnonzero(m == ig) + lo
+        near = np.abs(pos[:, None] - rec_f.ignore_samples[None, :]).min(axis=1) if len(pos) else []
+        far += int((np.asarray(near) > half).sum())
+    check("every ignore sample lies on an unclassified beat", far == 0,
+          f"{far} samples further than {C.BEAT_IGNORE_HALFWIDTH_MS:.0f} ms")
+    check("the classified beats are all still painted",
+          all(v > 0 for v in {c: int((stf == C.BEAT_CLASS_ID[c]).sum())
+                              for c in ("N", "PAC", "PVC")}.values()))
+    check("the ignore setting is in the beat cache's fingerprint only",
+          "beat_ignore" in W.BEAT_ONLY_KEYS)
+
     print("\n6. rhythm extraction")
     Xr, Yr, _ = W.extract_rhythm(rec, rng, cap=80)
     check("windows produced", len(Xr) > 0, f"{len(Xr)} windows")

@@ -32,7 +32,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from ..config import BEAT_CLASSES, window_samples
+from ..config import BEAT_CLASSES, BEAT_IGNORE_ID, window_samples
 
 
 class LayerNorm1d(nn.Module):
@@ -251,9 +251,18 @@ class SegmentationLoss(nn.Module):
         self.eps = eps
 
     def forward(self, logits, target):
-        ce = F.cross_entropy(logits, target, weight=self.w)
-        probs = F.softmax(logits, dim=1)
-        oh = F.one_hot(target, num_classes=logits.shape[1]).permute(0, 2, 1).float()
+        # Samples marked BEAT_IGNORE_ID (real beats outside the three classes)
+        # take no part in either term: no cross-entropy, and neither the
+        # prediction nor the target counts toward any class's Dice.
+        valid = target != BEAT_IGNORE_ID
+        if not bool(valid.any()):
+            return logits.sum() * 0.0
+        ce = F.cross_entropy(logits, target, weight=self.w,
+                             ignore_index=BEAT_IGNORE_ID)
+        keep = valid.unsqueeze(1).float()
+        safe = torch.where(valid, target, torch.zeros_like(target))
+        probs = F.softmax(logits, dim=1) * keep
+        oh = F.one_hot(safe, num_classes=logits.shape[1]).permute(0, 2, 1).float() * keep
         inter = (probs * oh).sum(dim=(0, 2))
         denom = probs.sum(dim=(0, 2)) + oh.sum(dim=(0, 2))
         dice = 1.0 - ((2 * inter + self.eps) / (denom + self.eps))
@@ -283,6 +292,7 @@ def class_weights_from_masks(masks, cap: float = 8.0) -> torch.Tensor:
     import numpy as np
 
     m = np.asarray(masks).ravel()
+    m = m[m != BEAT_IGNORE_ID]          # ignored samples belong to no class
     total = len(m)
     w = []
     for i in range(len(BEAT_CLASSES)):

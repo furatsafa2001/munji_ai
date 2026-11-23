@@ -9,13 +9,13 @@ from __future__ import annotations
 
 import csv
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterator, Optional
 
 import numpy as np
 
-from ..config import RAW_DIR
+from ..config import BEAT_IGNORE_SYMBOLS, RAW_DIR
 from . import preprocess as pp
 from .registry import SAME_SUBJECT, Dataset, get
 
@@ -31,6 +31,12 @@ class Record:
     beat_symbols: np.ndarray    # WFDB beat symbol per annotation
     rhythm_starts: np.ndarray   # sample index where each rhythm segment begins
     rhythm_labels: np.ndarray   # rhythm token, e.g. '(AFIB'
+    # Sample index of every real beat outside the three classes
+    # (config.BEAT_IGNORE_SYMBOLS). Kept apart from beat_samples so nothing
+    # that counts beats or reads their classes sees them; only the beat
+    # cache reads them, to mark those complexes ignore instead of background.
+    ignore_samples: np.ndarray = field(
+        default_factory=lambda: np.zeros(0, dtype=np.int64))
 
     @property
     def duration_sec(self) -> float:
@@ -213,6 +219,7 @@ def load_record(
     ratio = len(sigout) / max(len(raw), 1)
     beats_s = np.array([], dtype=np.int64)
     beats_y = np.array([], dtype="<U2")
+    ignore_s = np.array([], dtype=np.int64)
     rhy_s = np.array([], dtype=np.int64)
     rhy_y = np.array([], dtype=object)
 
@@ -228,6 +235,9 @@ def load_record(
             keep = np.isin(sym, list(BEAT_MAP))
             if keep.any():
                 beats_s, beats_y = idx[keep], sym[keep]
+            ign = np.isin(sym, list(BEAT_IGNORE_SYMBOLS))
+            if ign.any():
+                ignore_s = idx[ign]
 
             aux = getattr(ann, "aux_note", None)
             if aux:
@@ -301,6 +311,7 @@ def load_record(
         beat_symbols=beats_y,
         rhythm_starts=rhy_s,
         rhythm_labels=rhy_y,
+        ignore_samples=ignore_s,
     )
 
 

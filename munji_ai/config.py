@@ -87,6 +87,22 @@ BEAT_CLASSES = ("background", "N", "PAC", "PVC")
 BEAT_CLASS_ID = {c: i for i, c in enumerate(BEAT_CLASSES)}
 QRS_HALFWIDTH_MS = {"N": 50.0, "PAC": 50.0, "PVC": 70.0}
 
+# Real QRS complexes that belong to none of the three classes. AAMI EC57 puts
+# fusion beats (F) in class F, and paced beats (/), fusions of paced and normal
+# (f) and unclassifiable beats (Q) in class Q; neither class is one MUNJI
+# reports. The rest are WFDB beat codes outside the AAMI mapping (? not
+# classified, B bundle branch block unspecified, r R-on-T, n supraventricular
+# escape), left unmapped until a source settles their class.
+#
+# Their samples were painted background, which taught the model that a real
+# complex is "no beat" (MITDB 208 alone carries 373 fusion beats). They are now
+# painted BEAT_IGNORE_ID: left out of the loss, the class weights and every
+# score, so the model is neither rewarded nor punished for what it says there.
+# The half-width is the widest class's: these beats are wide.
+BEAT_IGNORE_ID = 255
+BEAT_IGNORE_SYMBOLS = ("F", "/", "f", "Q", "?", "B", "r", "n")
+BEAT_IGNORE_HALFWIDTH_MS = 70.0
+
 # Predicted mask regions narrower than this are dropped before beats are read
 # off the mask. A real QRS spans about 100 ms; anything much narrower is a
 # patch of uncertainty, not a complex.
