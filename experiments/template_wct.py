@@ -4,6 +4,7 @@
     python experiments/template_wct.py --negatives nsrdb      # quicker first look
     python experiments/template_wct.py --max-records 2        # smoke test
     python experiments/template_wct.py --no-gate --workers 6
+    python experiments/template_wct.py --cal strict          # the first run's calibration
 
 Why
 ---
@@ -20,8 +21,8 @@ from above (S-ICD, Boston Scientific): the patient's own beat is stored at
 rest as a template, and during a fast rhythm every beat is compared with it.
 Beats that keep their usual shape mean a conducted rhythm (sinus, AF, SVT);
 beats that lost it mean a ventricular origin. In the START study (Gold et
-al., JACC 2012) this reached 100% sensitivity for VT/VF and 98% specificity
-for SVT. QRS template matching on Holter recordings separated ventricular
+al., J Cardiovasc Electrophysiol 2012) this reached 100% sensitivity for
+VT/VF and 98% specificity for SVT. QRS template matching on Holter recordings separated ventricular
 beats at 98.4% sensitivity and 98.9% specificity (PubMed 17805974). One lead
 is enough: the S-ICD senses one vector. Nothing here is trained.
 
@@ -34,10 +35,20 @@ beats     the rate engine's own detector (rules.rate_engine.detect_beats:
           beat under half of it, so VT smaller than the sinus QRS is only
           found by a window that starts inside the VT and learns it there.
 template  calibration, as at patch-on: the first 10 s stretch with a rate of
-          40 to 100 where at least 80% of the beats correlate 0.90 or more
-          with their median. Where rhythm labels exist, only a stretch
-          labelled with a conducted rhythm (NSR, AF, AFL, sinus brady)
-          qualifies: the patch is put on in the patient's usual rhythm.
+          40 to 100 and one main shape. --cal dominant (the default): the
+          main shape is the beat that most of the stretch's beats match at
+          0.90 or more, and it must hold 60% of them; the template is the
+          median of those beats, so ectopic beats in the stretch are left
+          out instead of spoiling it. Where rhythm labels exist, the stretch
+          must not touch a ventricular, paced, noisy or unknown rhythm
+          (CAL_EXCLUDED, the records' own tokens): sinus rhythm with frequent
+          ventricular ectopy (VFDB's HGEA), first-degree block or a nodal
+          rhythm qualify, as the patient's usual rhythm at patch-on would.
+          --cal strict, the first run: 80% of the beats at 0.90 or more with
+          their median, and only a stretch labelled NSR, AF, AFL or sinus
+          brady. It found no template in 14 of 69 records, among them the
+          two VFDB records whose pictures show VT from 100 to 150 bpm (607,
+          611), so both were missed.
           "fixed" keeps that template for the whole recording. "adaptive"
           moves to every later stretch that qualifies, labels not used
           (posture and electrode changes); no stretch above 100 bpm
@@ -116,7 +127,11 @@ CAL_SEC = 10.0                         # calibration stretch
 CAL_BPM = (40.0, 100.0)
 CAL_MIN_BEATS = 6
 CAL_MATCH, CAL_SHARE = 0.90, 0.80      # "one shape": 80% of beats at 0.90 or more
-CAL_RHYTHMS = {"NSR", "AF", "AFL", "BRADY"}   # conducted rhythms
+CAL_RHYTHMS = {"NSR", "AF", "AFL", "BRADY"}   # --cal strict: conducted rhythms
+CAL_DOMINANT = 0.60                    # --cal dominant: the main shape holds 60% of the beats
+CAL_EXCLUDED = {"(VT", "(VF", "(VFL", "(VFIB", "(VER", "(IVR", "(PM", "(P", "(ASYS",
+                "(NOISE", "(UNKNOWN"}  # --cal dominant: raw rhythm tokens no template comes from
+CALS = ("dominant", "strict")
 SUSTAIN = C.VT_SUSTAINED_SEC           # 30 s
 FRACTION = C.VT_SUSTAINED_PVC_FRACTION  # 0.80
 GATE_BLOCK_SEC = C.WINDOW_SEC["quality"]   # 5 s
@@ -205,6 +220,28 @@ def stretch_template(ext: np.ndarray, L: int, lag: int):
     return np.median(w[np.arange(int(good.sum())), k[good]], axis=0)
 
 
+def dominant_template(ext: np.ndarray, L: int, lag: int):
+    """Median of the stretch's main shape if it holds CAL_DOMINANT of the beats.
+
+    The main shape is the beat that most beats match at CAL_MATCH (ties: the
+    one they match best). A stretch the strict rule accepts is taken as it
+    would be, so clean recordings calibrate exactly as before.
+    """
+    if len(ext) < CAL_MIN_BEATS:
+        return None
+    quick = stretch_template(ext, L, lag)
+    if quick is not None:
+        return quick
+    R = np.stack([best_corr(ext, ext[i, lag:lag + L]) for i in range(len(ext))])
+    m = int(np.argmax((R >= CAL_MATCH).sum(axis=1) + 1e-3 * R.mean(axis=1)))
+    good = R[m] >= CAL_MATCH
+    if good.sum() < CAL_MIN_BEATS or good.mean() < CAL_DOMINANT:
+        return None
+    _, k = best_corr(ext[good], ext[m, lag:lag + L], with_shift=True)
+    w = np.lib.stride_tricks.sliding_window_view(ext[good], L, axis=1)
+    return np.median(w[np.arange(int(good.sum())), k], axis=0)
+
+
 def self_alike(ext: np.ndarray, L: int, lag: int) -> float:
     """Median correlation of beats with their own median beat (monomorphic)."""
     if len(ext) < 3:
@@ -212,13 +249,17 @@ def self_alike(ext: np.ndarray, L: int, lag: int) -> float:
     return float(np.median(best_corr(ext, np.median(ext[:, lag:lag + L], axis=0))))
 
 
-def calibrations(t: np.ndarray, ext: np.ndarray, L: int, lag: int) -> list:
-    """(start, end, template) of every CAL_SEC stretch that qualifies."""
-    out = []
+def calibrations(t: np.ndarray, ext: np.ndarray, L: int, lag: int, mode: str = "dominant"):
+    """(stretches, counts): (start, end, template) of every CAL_SEC stretch
+    that qualifies by rate and shape, and how many stretches there were, how
+    many had the rate (CAL_BPM, CAL_MIN_BEATS) and how many also one shape."""
+    out, n = [], {"stretches": 0, "rate": 0, "shape": 0}
     if len(t) < CAL_MIN_BEATS:
-        return out
+        return out, n
+    shape = dominant_template if mode == "dominant" else stretch_template
     edges = np.arange(0.0, t[-1] + CAL_SEC, CAL_SEC)
     idx = np.searchsorted(t, edges)
+    n["stretches"] = len(edges) - 1
     for k in range(len(edges) - 1):
         i, j = int(idx[k]), int(idx[k + 1])
         if j - i < CAL_MIN_BEATS or t[j - 1] <= t[i]:
@@ -226,10 +267,33 @@ def calibrations(t: np.ndarray, ext: np.ndarray, L: int, lag: int) -> list:
         bpm = 60.0 * (j - i - 1) / (t[j - 1] - t[i])
         if not CAL_BPM[0] <= bpm <= CAL_BPM[1]:
             continue
-        tpl = stretch_template(ext[i:j], L, lag)
+        n["rate"] += 1
+        tpl = shape(ext[i:j], L, lag)
         if tpl is not None:
+            n["shape"] += 1
             out.append((float(edges[k]), float(edges[k + 1]), tpl))
-    return out
+    return out, n
+
+
+def raw_intervals(rec, lo: int, hi: int) -> list:
+    """(start s, end s, token) from the record's own rhythm markers, in
+    seconds from lo: the tokens as written ("(HGEA", "(VER"), before they are
+    folded into rhythm classes."""
+    if len(rec.rhythm_starts) == 0:
+        return []
+    s = np.asarray(rec.rhythm_starts, np.int64)
+    o = np.argsort(s, kind="stable")
+    s = s[o]
+    tok = [str(rec.rhythm_labels[i]).split("\x00")[0].strip() for i in o]
+    e = np.append(s[1:], len(rec.signal))
+    return [((max(a, lo) - lo) / rec.fs, (min(b, hi) - lo) / rec.fs, t)
+            for a, b, t in zip(s, e, tok) if b > a and b > lo and a < hi]
+
+
+def why_no_template(n: dict) -> str:
+    """The calibration counts of a record, read out."""
+    return (f"{n['stretches']} stretches of {CAL_SEC:.0f} s, {n['rate']} at {CAL_BPM[0]:.0f}-"
+            f"{CAL_BPM[1]:.0f} bpm, {n['shape']} of one main shape, {n['allowed']} in an allowed rhythm")
 
 
 # -------------------------------------------------------------------- gate
@@ -318,9 +382,10 @@ def combo_alerts(dec: dict, tpl: str, R: float, ci: int, M, gated: bool, step: f
 
 
 # ------------------------------------------------------------------ record
-def beats_and_template(rec, step: float, annotated_span: bool = False) -> dict:
+def beats_and_template(rec, step: float, annotated_span: bool = False, mode: str = "dominant") -> dict:
     """Beats, templates and correlations of one record, as the app would get
-    them. Shared by process() and template_wct_plot.py.
+    them. Shared by process() and template_wct_plot.py. mode: the
+    calibration, "dominant" or "strict" (CALS).
 
     x, fs, ivs   the signal analysed (the annotated span or all) and its rhythm
                  intervals in seconds from its start
@@ -330,6 +395,7 @@ def beats_and_template(rec, step: float, annotated_span: bool = False) -> dict:
                  into pos, and its times in seconds
     cal, first   every calibration stretch that qualifies (start, end,
                  template) and the one used as patch-on (None: no template)
+    cal_counts   stretches, then with the rate, one shape, an allowed rhythm
     corr         per position in pos: correlation with the fixed and the
                  adaptive template (NaN without a template)
     """
@@ -350,12 +416,15 @@ def beats_and_template(rec, step: float, annotated_span: bool = False) -> dict:
     si = index_of(pos, sb)                     # the stream, as indices into pos
     ts = tpos[si]
 
-    cal = calibrations(ts, ext[si], L, lag)
-    conducted = [(s, e) for s, e, lab in ivs if lab in CAL_RHYTHMS]
-    if ivs:
-        first = next((c for c in cal if any(s <= c[0] and c[1] <= e for s, e in conducted)), None)
+    cal, counts = calibrations(ts, ext[si], L, lag, mode)
+    if mode == "strict":
+        conducted = [(s, e) for s, e, lab in ivs if lab in CAL_RHYTHMS]
+        allowed = [c for c in cal if not ivs or any(s <= c[0] and c[1] <= e for s, e in conducted)]
     else:
-        first = cal[0] if cal else None
+        blocked = [(s, e) for s, e, tok in raw_intervals(rec, lo, hi) if tok in CAL_EXCLUDED]
+        allowed = [c for c in cal if not any(s < c[1] and c[0] < e for s, e in blocked)]
+    counts["allowed"] = len(allowed)
+    first = allowed[0] if allowed else None
 
     corr = {k: np.full(len(pos), np.nan) for k in TEMPLATES}
     if first is not None:
@@ -368,11 +437,12 @@ def beats_and_template(rec, step: float, annotated_span: bool = False) -> dict:
             if b > a:
                 corr["adaptive"][a:b] = best_corr(ext[a:b], tpls[k][2])
     return {"x": x, "fs": fs, "ivs": ivs, "L": L, "lag": lag, "ends": ends, "wbeats": wbeats,
-            "pos": pos, "ext": ext, "si": si, "ts": ts, "cal": cal, "first": first, "corr": corr}
+            "pos": pos, "ext": ext, "si": si, "ts": ts, "cal": cal, "first": first, "corr": corr,
+            "cal_counts": counts}
 
 
-def process(rec, gate_ckpt, annotated_span: bool, step: float) -> dict:
-    b = beats_and_template(rec, step, annotated_span)
+def process(rec, gate_ckpt, annotated_span: bool, step: float, mode: str = "dominant") -> dict:
+    b = beats_and_template(rec, step, annotated_span, mode)
     x, fs, ivs, L, lag = b["x"], b["fs"], b["ivs"], b["L"], b["lag"]
     ends, wbeats, pos, ext = b["ends"], b["wbeats"], b["pos"], b["ext"]
     si, ts, cal, first, corr = b["si"], b["ts"], b["cal"], b["first"], b["corr"]
@@ -405,19 +475,19 @@ def process(rec, gate_ckpt, annotated_span: bool, step: float) -> dict:
         usable_share = float(np.mean(dec["usable"][dec["ok"]]))
     return {"dataset": rec.dataset, "name": rec.name, "patient": rec.patient,
             "hours": len(x) / fs / 3600.0, "n_beats": int(len(ts)), "ivs": ivs,
-            "first": first[1] if first else None, "n_cal": len(cal),
+            "first": first[1] if first else None, "n_cal": len(cal), "cal_counts": b["cal_counts"],
             "alerts": alerts, "episodes": episodes, "usable_share": usable_share}
 
 
 def _work(job) -> dict:
     """One record, in a worker process."""
-    ds, name, raw, gate, negative, step, one_thread = job
+    ds, name, raw, gate, negative, step, one_thread, mode = job
     t1 = time.time()
     try:
         if gate is not None and one_thread:
             import torch
             torch.set_num_threads(1)
-        r = process(load_record(ds, name, raw), gate, annotated_span=negative, step=step)
+        r = process(load_record(ds, name, raw), gate, annotated_span=negative, step=step, mode=mode)
     except Exception as e:                       # one bad record must not end the run
         return {"dataset": ds, "name": name, "error": f"{type(e).__name__}: {e}"}
     r["secs"] = time.time() - t1
@@ -473,9 +543,9 @@ def report(results: list, gated: bool) -> None:
     short = [(r, ep) for r, ep in eps if ep["dur"] < SUSTAIN]
     print("\n" + ", ".join(f"{k} {v:.1f} h" for k, v in hours.items()))
     no_tpl = [r for r in results if r["first"] is None]
-    names = ", ".join(r["dataset"] + " " + r["name"] for r in no_tpl[:8]) + (" ..." if len(no_tpl) > 8 else "")
-    print(f"records without a template (never 10 s of one shape at 40-100 bpm in a conducted rhythm): "
-          f"{len(no_tpl)} of {len(results)}" + (f" ({names})" if no_tpl else ""))
+    print(f"records without a template: {len(no_tpl)} of {len(results)}")
+    for r in no_tpl:
+        print(f"  {r['dataset']} {r['name']}: {why_no_template(r['cal_counts'])}")
     if gated:
         us = [r["usable_share"] for r in results if np.isfinite(r["usable_share"])]
         print(f"gate: {np.mean(us):.0%} of 30 s decisions usable (mean over records)")
@@ -554,6 +624,8 @@ def main(argv=None) -> int:
     ap.add_argument("--raw", type=Path, default=C.RAW_DIR)
     ap.add_argument("--max-records", type=int, default=0, help="per set (0 = all)")
     ap.add_argument("--workers", type=int, default=4, help="records processed in parallel")
+    ap.add_argument("--cal", choices=CALS, default="dominant",
+                    help="template calibration: dominant shape (default) or the first run's strict rule")
     a = ap.parse_args(argv)
 
     gate = None if a.no_gate else a.gate_ckpt
@@ -564,10 +636,11 @@ def main(argv=None) -> int:
         print("gate off: PyTorch is not installed")
         gate = None
     print("gate " + (f"on: {gate}, P(usable) >= {C.GATE_MIN_P['morphology']}" if gate else "off"))
+    print(f"calibration {a.cal}")
 
     order = list(a.positives) + list(a.negatives)
     jobs = [(ds, name, a.raw, gate, ds in a.negatives, a.neg_stride if ds in a.negatives else POS_STEP,
-             a.workers > 1)
+             a.workers > 1, a.cal)
             for ds in order for name in eligible(ds, a.raw, a.max_records)]
     if not jobs:
         print("no records")

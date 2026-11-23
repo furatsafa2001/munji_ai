@@ -3,6 +3,7 @@
     python experiments/template_wct_plot.py                   # every VT of 30 s or more
     python experiments/template_wct_plot.py --records 422 423 430
     python experiments/template_wct_plot.py --min-dur 0       # the short ones too
+    python experiments/template_wct_plot.py --cal strict      # the first run's calibration
 
 Writes one PDF (template_wct_plots.pdf), one page per episode:
 
@@ -127,7 +128,7 @@ def episode_page(pdf, plt, ds, name, b, s: float, e: float) -> dict:
                                                f"({tw._mmss(first[0])} to {tw._mmss(first[1])})")
     else:
         a3.axis("off")
-        a3.text(0.0, 0.5, "No template: never 10 s of one shape at 40 to 100 bpm in a conducted rhythm.",
+        a3.text(0.0, 0.5, f"No template: {tw.why_no_template(b['cal_counts'])}.",
                 fontsize=9, transform=a3.transAxes)
 
     a4 = fig.add_subplot(gs[3, 0])
@@ -182,6 +183,7 @@ def main(argv=None) -> int:
     ap.add_argument("--raw", type=Path, default=C.RAW_DIR)
     ap.add_argument("--max-records", type=int, default=0, help="per set (0 = all)")
     ap.add_argument("--out", type=Path, default=Path("template_wct_plots.pdf"))
+    ap.add_argument("--cal", choices=tw.CALS, default="dominant", help="template calibration")
     a = ap.parse_args(argv)
 
     import matplotlib
@@ -200,7 +202,7 @@ def main(argv=None) -> int:
                        and (e - s) / rec.fs >= a.min_dur]
                 if not eps:
                     continue
-                b = tw.beats_and_template(rec, tw.POS_STEP)
+                b = tw.beats_and_template(rec, tw.POS_STEP, mode=a.cal)
                 for s, e in eps:
                     rows.append(episode_page(pdf, plt, ds, name, b, s / rec.fs, e / rec.fs))
                 print(f"  {ds} {name}: {len(eps)} pages", flush=True)
