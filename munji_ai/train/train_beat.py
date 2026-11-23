@@ -186,7 +186,7 @@ def predict(model, loader, device, clean: bool = True) -> np.ndarray:
     model.eval()
     out = []
     for xb, _ in loader:
-        m = model(xb.to(device)).argmax(dim=1).cpu().numpy()
+        m = model(xb.to(device).float()).argmax(dim=1).cpu().numpy()
         out.append(clean_mask(m) if clean else m)
     return np.concatenate(out)
 
@@ -227,10 +227,13 @@ def main(argv=None) -> int:
     if overlap:
         raise AssertionError(f"patient leak between train and val: {overlap}")
 
-    Xtr = torch.from_numpy(np.asarray(tr["X"], dtype=np.float32))
-    Ytr = torch.from_numpy(np.asarray(tr["y"], dtype=np.int64))
-    Xva = torch.from_numpy(np.asarray(va["X"], dtype=np.float32))
-    Yva = torch.from_numpy(np.asarray(va["y"], dtype=np.int64))
+    # Held as cached (float16 signal, uint8 mask) and widened one batch at a
+    # time. Widening everything up front cost 4 + 8 bytes per sample, about
+    # 6 GB at 100k windows; the values are the same either way.
+    Xtr = torch.from_numpy(np.ascontiguousarray(tr["X"]))
+    Ytr = torch.from_numpy(np.ascontiguousarray(tr["y"], dtype=np.uint8))
+    Xva = torch.from_numpy(np.ascontiguousarray(va["X"]))
+    Yva = torch.from_numpy(np.ascontiguousarray(va["y"], dtype=np.uint8))
     yva_np = np.asarray(va["y"])
 
     ytr = np.asarray(tr["y"])
@@ -270,7 +273,7 @@ def main(argv=None) -> int:
         model.train()
         tot, t0 = 0.0, time.time()
         for xb, yb in train_loader:
-            xb, yb = xb.to(device), yb.to(device)
+            xb, yb = xb.to(device).float(), yb.to(device).long()
             opt.zero_grad()
             loss = crit(model(xb), yb)
             loss.backward()

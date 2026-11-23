@@ -216,12 +216,31 @@ REGISTRY: dict[str, Dataset] = {
     ),
     "ltafdb": Dataset(
         key="ltafdb", slug="ltafdb", version="1.0.0",
-        fs=128, channel=0, role="train", labels="rhythm",
+        fs=128, channel=0, role="train", labels="both",
         patient_re=r"^(\d+)$",
-        stages=("rhythm", "quality"),
+        stages=("rhythm", "quality", "beat"),
         note="Long-term AF. ~2000 hours annotated. Critical quality carrier: AF is "
              "irregular by definition, and a gate trained only on NSR learns "
-             "'irregular = noise' and hides exactly what MUNJI exists to detect.",
+             "'irregular = noise' and hides exactly what MUNJI exists to detect. "
+             "Beat stage (Nov 2026): its atr beat labels were manually reviewed "
+             "(PhysioNet), and it holds 484 ventricular runs of 3+ beats outside "
+             "the test split, against 63 in Icentia (data/vt_runs.py). Beat symbols "
+             "outside the test split: N, A, V, Q. ODC-By 1.0.",
+    ),
+    "incartdb": Dataset(
+        key="incartdb", slug="incartdb", version="1.0.0",
+        fs=257, channel=10, role="train", labels="beat",
+        patient_re=r"^P(\d+)$",
+        stages=("beat",),
+        channel_names=("V5",),
+        note="St Petersburg INCART 12-lead: 75 half-hour records from 32 Holter "
+             "patients aged 18-80 (mean 58), none paced; coronary disease, MI, "
+             "paroxysmal VT, RBBB (patient 8), WPW (29, 30). Wide beats that are not "
+             "ventricular, labelled by type, which the beat model must not call PVC. "
+             "V5 is the lead nearest CM5. Annotations were placed automatically and "
+             "corrected by hand, but their positions were not re-aligned, so a few "
+             "may sit off the R peak. Record names do not carry the patient: the "
+             "header does, and INCART_PATIENT below holds it. ODC-By 1.0.",
     ),
 
     # -------------------------------------------------------------- validation
@@ -230,8 +249,12 @@ REGISTRY: dict[str, Dataset] = {
         fs=360, channel=0, role="val", labels="both",
         patient_re=r"^(\d+)$",
         stages=("beat", "rhythm"),
-        note="Universal benchmark — never train on it. Records 201 and 202 are the "
-             "same subject and must share a split.",
+        note="Universal benchmark. Split by the de Chazal inter-patient division "
+             "(config.MITDB_DS1 / MITDB_DS2): DS1 develops the beat model only and "
+             "is used by no other stage; DS2 is the held-out test, which is what "
+             "published inter-patient results report on. Records 201 and 202 are "
+             "the same subject and the division puts them on opposite sides, so 202 "
+             "goes with 201. The four paced records are in neither half (AAMI).",
     ),
     "afdb": Dataset(
         key="afdb", slug="afdb", version="1.0.0",
@@ -270,8 +293,31 @@ REGISTRY: dict[str, Dataset] = {
 
 NOISE_RECORDS = ("bw", "em", "ma")
 
-# Records known to share a subject. Split assignment uses the first name.
+# INCART patient number -> its records, as each record's header states it
+# ("patient N"). Split assignment is per patient, so every record of a patient
+# must map to the same id; a record missing here fails patient_re loudly
+# instead of becoming a patient of its own. tests/test_beat_data.py re-reads
+# the headers when the data is present and checks this table against them.
+INCART_PATIENT = {
+    1: ('I01', 'I02'), 2: ('I03', 'I04', 'I05'), 3: ('I06', 'I07'),
+    4: ('I08',), 5: ('I09', 'I10', 'I11'), 6: ('I12', 'I13', 'I14'),
+    7: ('I15',), 8: ('I16', 'I17'), 9: ('I18', 'I19'),
+    10: ('I20', 'I21', 'I22'), 11: ('I23', 'I24'), 12: ('I25', 'I26'),
+    13: ('I27', 'I28'), 14: ('I29', 'I30', 'I31', 'I32'), 15: ('I33', 'I34'),
+    16: ('I35', 'I36', 'I37'), 17: ('I38', 'I39'), 18: ('I40', 'I41'),
+    19: ('I42', 'I43'), 20: ('I44', 'I45', 'I46'), 21: ('I47', 'I48'),
+    22: ('I49', 'I50'), 23: ('I51', 'I52', 'I53'), 24: ('I54', 'I55', 'I56'),
+    25: ('I57', 'I58'), 26: ('I59', 'I60', 'I61'), 27: ('I62', 'I63', 'I64'),
+    28: ('I65', 'I66', 'I67'), 29: ('I68', 'I69'), 30: ('I70', 'I71'),
+    31: ('I72', 'I73'), 32: ('I74', 'I75'),
+}
+
+# Records known to share a subject: (dataset, record) -> the name the
+# dataset's patient_re reads the patient from. For MITDB that is the first
+# record of the subject; for INCART it is "P" and the patient number.
 SAME_SUBJECT = {("mitdb", "202"): "201"}
+SAME_SUBJECT.update({("incartdb", rec): f"P{p:02d}"
+                     for p, recs in INCART_PATIENT.items() for rec in recs})
 
 
 def by_role(role: Role) -> list[Dataset]:

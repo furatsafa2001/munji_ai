@@ -74,6 +74,32 @@ def stride_samples(stage: str) -> int:
 SPLIT_FRACTIONS = {"train": 0.70, "val": 0.15, "test": 0.15}
 SPLIT_SEED = 20260817
 
+# MITDB, by the inter-patient division of de Chazal et al. (2004): DS1 to
+# develop on, DS2 held out. Published inter-patient results report on DS2, so
+# training on DS1 keeps every comparison valid. Agreed with the decision-layer
+# side (Nov 2026) on three conditions:
+#   DS1 is for the beat model only: no other stage reads it.
+#   202 is the same subject as 201 (PhysioNet) but sits in DS2; it moves to
+#   DS1 with 201, and DS2 without it is the end-to-end test.
+#   The four paced records (102, 104, 107, 217) are in neither half, as AAMI
+#   EC57 excludes them; they are used nowhere.
+MITDB_DS1 = ("101", "106", "108", "109", "112", "114", "115", "116", "118",
+             "119", "122", "124", "201", "203", "205", "207", "208", "209",
+             "215", "220", "223", "230")
+MITDB_DS2 = ("100", "103", "105", "111", "113", "117", "121", "123", "200",
+             "202", "210", "212", "213", "214", "219", "221", "222", "228",
+             "231", "232", "233", "234")
+MITDB_PACED = ("102", "104", "107", "217")
+MITDB_MOVED_TO_DS1 = ("202",)
+# DS1 records that validate the beat model rather than train it. Hashing by
+# patient put all four bundle branch block records in train, leaving nothing
+# to check BBB on before the final test. Rule, fixed before any training: for
+# each block type, the record that also carries ventricular runs trains (207,
+# 105-beat run; 124, 18-beat run) and the other validates (109 LBBB, 118 RBBB).
+# 101, 115 and 122 are where the hash put them (val, or test, which DS1 has none
+# of). Beat counts per record: tools run on 23 Nov 2026 over the annotations.
+MITDB_DS1_VAL = ("101", "109", "115", "118", "122")
+
 # ---------------------------------------------------- beat segmentation masks
 # The beat classifier predicts a per-sample mask rather than one label per
 # window, so it needs no R-peak detector at inference. Annotations give only
@@ -337,6 +363,22 @@ NEGATIVE_KEEP_RATE = {"beat": 0.15, "rhythm": 0.35, "shockable": 0.5}
 # so one patient with very frequent ectopy cannot fill the cache alone.
 BEAT_KEEP_ALL_ECTOPIC = True
 BEAT_MAX_ECTOPIC_PER_PATIENT = 600
+
+# The ceiling holds across all of a patient's records (it used to apply per
+# record), and ectopic windows no longer use up the normal-window cap above.
+# They did: a multi-record patient with frequent ectopy spent the whole cap on
+# the first record read and every other record was skipped, so an INCART
+# patient whose VT sits in their third half-hour could lose it.
+#
+# Windows holding a run of at least this many consecutive ventricular beats are
+# always kept and do not count toward the ceiling, which then bounds the other
+# ectopic windows only; 0 turns this off. A long-term record can
+# carry thousands of ectopic windows, and the ceiling used to drop runs at
+# random with the rest. Runs are where the beat model fails (PVC sensitivity
+# 0.93 isolated, about 0.84 in runs of 3 to 4, about 0.05 inside sustained VT),
+# three consecutive ventricular beats at 100 bpm or more is the definition of
+# VT, and runs are rare enough that keeping all of them costs little.
+BEAT_ALWAYS_KEEP_RUNS = 3
 
 CACHE_DTYPE = "float16"
 

@@ -33,13 +33,15 @@ from .. import config as C
 from . import augment, preprocess as pp
 from .loader import Record, beat_classes, iter_records, list_records
 from .registry import get
+from .splits import in_stage
 
 # --------------------------------------------------------------------- hashing
 
 
 # Config values only extract_beat reads. They are in the beat cache's
 # fingerprint and no other, so changing them invalidates the beat cache alone.
-BEAT_ONLY_KEYS = ("keep_all_ectopic", "max_ectopic", "beat_ignore")
+BEAT_ONLY_KEYS = ("keep_all_ectopic", "max_ectopic", "beat_ignore", "keep_runs",
+                  "ectopic_accounting")
 
 # The same for extract_shockable: the per-window label rules
 # (data/shockable_labels.py, config "Shockable labels, one per window").
@@ -67,6 +69,10 @@ def config_hash(stage: str | None = None) -> str:
         "beat_ignore": {"id": C.BEAT_IGNORE_ID,
                         "symbols": sorted(C.BEAT_IGNORE_SYMBOLS),
                         "halfwidth_ms": C.BEAT_IGNORE_HALFWIDTH_MS},
+        "keep_runs": getattr(C, "BEAT_ALWAYS_KEEP_RUNS", 0),
+        # Ectopic windows counted apart from the normal-window cap, with the
+        # ceiling per patient (build_stage). Changes which windows are cached.
+        "ectopic_accounting": "per-patient-v1",
         "beat_classes": C.BEAT_CLASSES,
         "purity": [C.RHYTHM_PURITY, C.SHOCKABLE_PURITY],
         "shockable_rhythms": sorted(C.SHOCKABLE_RHYTHMS),
@@ -192,8 +198,35 @@ def _frames(rec: Record, stage: str):
         yield lo, lo + win
 
 
-def extract_beat(rec: Record, rng, cap: int):
-    """Windows with per-sample masks. Ectopic-bearing windows are prioritised."""
+def longest_pvc_run(classes) -> int:
+    """Longest stretch of consecutive PVC labels (names or ids), in beat order."""
+    pvc = ("PVC", C.BEAT_CLASS_ID["PVC"])
+    best = run = 0
+    for c in classes:
+        run = run + 1 if c in pvc else 0
+        best = max(best, run)
+    return best
+
+
+def mask_beat_classes(mask) -> np.ndarray:
+    """Class id of every beat region in a mask, in order; background and
+    ignore-marked samples are skipped."""
+    m = np.asarray(mask)
+    if m.size == 0:
+        return m
+    starts = np.concatenate([[0], np.flatnonzero(np.diff(m) != 0) + 1])
+    lab = m[starts]
+    return lab[(lab != 0) & (lab != C.BEAT_IGNORE_ID)]
+
+
+def extract_beat(rec: Record, rng, cap: int, ectopic_room: int | None = None):
+    """Windows with per-sample masks. Ectopic-bearing windows are prioritised.
+
+    `cap` bounds the normal windows. `ectopic_room` is what is left of the
+    patient's ectopic ceiling (build_stage tracks it across their records);
+    without it the full ceiling applies. Windows with a ventricular run are
+    kept whatever the ceiling (config.BEAT_ALWAYS_KEEP_RUNS).
+    """
     cls = beat_classes(rec)
     keep = cls != "?"
     idx, cls = rec.beat_samples[keep], cls[keep]
@@ -218,7 +251,15 @@ def extract_beat(rec: Record, rng, cap: int):
         # two together and cutting to `cap` threw away the scarce class at
         # random, which is the opposite of what the reference method does.
         rng.shuffle(pos)
-        pos = pos[: C.BEAT_MAX_ECTOPIC_PER_PATIENT]
+        ceiling = (C.BEAT_MAX_ECTOPIC_PER_PATIENT if ectopic_room is None
+                   else max(0, int(ectopic_room)))
+        k = getattr(C, "BEAT_ALWAYS_KEEP_RUNS", 0)
+        if k:
+            runs = [it for it in pos if longest_pvc_run(it[3]) >= k]
+            rest = [it for it in pos if longest_pvc_run(it[3]) < k]
+            pos = runs + rest[:ceiling]          # runs sit outside the ceiling
+        else:
+            pos = pos[:ceiling]
         room = max(cap - len(pos), max(1, cap // 4))
         chosen = pos + neg[: min(n_neg, room)] if pos else neg[: max(1, cap // 4)]
         rng.shuffle(chosen)
@@ -401,8 +442,10 @@ def build_stage(stage: str, manifest: dict, out_dir: Path | None = None,
     written: dict[str, Path] = {}
 
     for split in ("train", "val", "test"):
+        # in_stage: MITDB DS1 is marked beat-only and no other stage reads it.
         entries = [e for e in manifest.values()
-                   if e["split"] == split and e["dataset"] in datasets]
+                   if e["split"] == split and e["dataset"] in datasets
+                   and in_stage(e, stage)]
         by_ds: dict[str, list] = {}
         for e in entries:
             by_ds.setdefault(e["dataset"], []).append(e)
@@ -441,24 +484,44 @@ def build_stage(stage: str, manifest: dict, out_dir: Path | None = None,
             # first record would take every window from one stretch of signal.
             per_patient = Counter(e["patient"] for e in items)
             spent: Counter = Counter()
+            # Beat stage: the cap bounds normal windows, the ectopic ceiling
+            # bounds ectopic ones, each per patient across their records
+            # (config.BEAT_MAX_ECTOPIC_PER_PATIENT explains why).
+            split_beat = stage == "beat" and getattr(C, "BEAT_KEEP_ALL_ECTOPIC", False)
+            spent_ect: Counter = Counter()
             for rec in iter_records(ds_key, root=raw_dir, names=names):
                 if len(X) >= budget:
                     break
                 n_rec = max(per_patient[rec.patient], 1)
                 room_pat = cap - spent[rec.patient]
-                if room_pat <= 0:
+                room_ect = C.BEAT_MAX_ECTOPIC_PER_PATIENT - spent_ect[rec.patient]
+                if room_pat <= 0 and (not split_beat or room_ect <= 0):
                     continue
                 per_rec = max(1, min(room_pat, cap // n_rec))
-                rng = np.random.default_rng(abs(hash((seed, rec.patient))) % 2**32)
+                rng = np.random.default_rng(patient_seed(seed, rec.patient))
                 fn = EXTRACTORS[stage]
-                out = (fn(rec, rng, per_rec, noises) if stage == "quality"
-                       else fn(rec, rng, per_rec))
+                if stage == "quality":
+                    out = fn(rec, rng, per_rec, noises)
+                elif split_beat:
+                    out = fn(rec, rng, per_rec, ectopic_room=room_ect)
+                else:
+                    out = fn(rec, rng, per_rec)
                 xs, ys, offs = out
                 room = budget - len(X)
                 xs, ys, offs = xs[:room], ys[:room], offs[:room]
                 X.extend(xs)
                 Y.extend(ys)
-                spent[rec.patient] += len(xs)
+                if split_beat:
+                    # Normal windows count against the cap, ectopic windows
+                    # without a run against the ceiling, run windows neither.
+                    k = getattr(C, "BEAT_ALWAYS_KEEP_RUNS", 0)
+                    for y in ys:
+                        if not np.isin(y, _ECTOPIC_IDS).any():
+                            spent[rec.patient] += 1
+                        elif not (k and longest_pvc_run(mask_beat_classes(y)) >= k):
+                            spent_ect[rec.patient] += 1
+                else:
+                    spent[rec.patient] += len(xs)
                 e = lookup[rec.name]
                 meta_ds += [ds_key] * len(xs)
                 meta_pat += [e["patient"]] * len(xs)
@@ -487,7 +550,48 @@ def build_stage(stage: str, manifest: dict, out_dir: Path | None = None,
                     else dict(Counter(Ya.tolist())))
             print(f"  [{stage}/{split}] {Xa.shape} {mb:.0f} MB "
                   f"patients={len(set(meta_pat))} {dist}")
+            if stage == "beat":
+                print_beat_composition(Ya, np.asarray(meta_ds), np.asarray(meta_pat))
     return written
+
+
+_ECTOPIC_IDS = (C.BEAT_CLASS_ID["PAC"], C.BEAT_CLASS_ID["PVC"])
+
+
+def patient_seed(seed: int, patient: str) -> int:
+    """The window-sampling seed for one patient, the same in every run.
+
+    It was abs(hash((seed, patient))), but Python salts str hashes per process,
+    so the seed changed with every build: no cache, in any stage, could be
+    rebuilt with the same windows twice. A digest does not change.
+    """
+    return int.from_bytes(hashlib.sha256(f"{seed}:{patient}".encode()).digest()[:8], "big")
+
+
+def beat_composition(Y, datasets, patients) -> dict:
+    """Per dataset: patients, windows, ectopic windows, windows with a run of
+    3+ PVCs, and the share of samples marked ignore."""
+    out: dict = {}
+    for ds in sorted(set(np.asarray(datasets).tolist())):
+        sel = np.asarray(datasets) == ds
+        Ys = np.asarray(Y)[sel]
+        ect = sum(bool(np.isin(y, _ECTOPIC_IDS).any()) for y in Ys)
+        runs = sum(longest_pvc_run(mask_beat_classes(y)) >= 3 for y in Ys)
+        out[ds] = {"patients": len(set(np.asarray(patients)[sel].tolist())),
+                   "windows": int(sel.sum()), "ectopic": int(ect), "runs3": int(runs),
+                   "ignored": float((Ys == C.BEAT_IGNORE_ID).mean()) if Ys.size else 0.0}
+    return out
+
+
+def print_beat_composition(Y, datasets, patients) -> None:
+    comp = beat_composition(Y, datasets, patients)
+    total = sum(v["windows"] for v in comp.values()) or 1
+    print(f"      {'dataset':<12}{'patients':>9}{'windows':>9}{'share':>7}"
+          f"{'ectopic':>9}{'runs 3+':>9}{'ignored':>9}")
+    for ds, v in comp.items():
+        print(f"      {ds:<12}{v['patients']:>9,}{v['windows']:>9,}"
+              f"{v['windows'] / total:>7.0%}{v['ectopic']:>9,}{v['runs3']:>9,}"
+              f"{v['ignored']:>9.2%}")
 
 
 def load_cache(stage: str, split: str, cache_dir: Path | None = None,
