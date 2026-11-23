@@ -76,7 +76,7 @@ def strip(ax, b, t0: float, t1: float, ref_t=None, title=""):
     pad = 0.25 * (hi - lo + 1e-6)
     top, bot = hi + pad, lo - pad
     k = np.flatnonzero((ts >= t0) & (ts < t1))
-    cf = b["corr"]["fixed"][b["si"][k]]
+    cf = b["corr"]["shape"][b["si"][k]]
     ax.plot(ts[k], np.full(k.size, top), "v", color="#d62728", ms=4, label="detector beat (correlation)")
     for t, c in zip(ts[k], cf):
         if np.isfinite(c):
@@ -98,7 +98,7 @@ def strip(ax, b, t0: float, t1: float, ref_t=None, title=""):
 
 def episode_page(pdf, plt, ds, name, b, s: float, e: float) -> dict:
     x, fs, ts, si, ext, L = b["x"], b["fs"], b["ts"], b["si"], b["ext"], b["L"]
-    first, cf = b["first"], b["corr"]["fixed"]
+    first, cf = b["first"], b["corr"]["shape"]
     i, j = np.searchsorted(ts, [s, e])
     k = si[i:j]
     seg = x[int(s * fs):int(e * fs)]
@@ -108,6 +108,7 @@ def episode_page(pdf, plt, ds, name, b, s: float, e: float) -> dict:
     rate_det = 60.0 / np.median(np.diff(ts[i:j])) if j - i >= 3 else float("nan")
     unlike = float(np.mean(cf[k] < tw.SHOW_C)) if first is not None and k.size else float("nan")
     corr_med = float(np.median(cf[k])) if first is not None and k.size else float("nan")
+    size_med = float(np.nanmedian(b["corr"]["size"][k])) if first is not None and k.size else float("nan")
     where = "none" if first is None else ("before" if first[1] <= s else "after")
 
     fig = plt.figure(figsize=(11.69, 8.27))
@@ -115,7 +116,8 @@ def episode_page(pdf, plt, ds, name, b, s: float, e: float) -> dict:
                           left=0.06, right=0.98, top=0.90, bottom=0.06)
     fig.suptitle(f"{ds} {name}   VT from {tw._mmss(s)} for {e - s:.0f} s   rate: signal {tw._f(rate_sig)}, "
                  f"detector {tw._f(rate_det)} bpm   beats unlike the template (corr < {tw.SHOW_C}): "
-                 f"{tw._f(unlike, '{:.0%}')}   template: {where}", fontsize=10, x=0.06, ha="left")
+                 f"{tw._f(unlike, '{:.0%}')}   median size {tw._f(size_med, '{:.2f}')}x the template's   "
+                 f"template: {where}", fontsize=10, x=0.06, ha="left")
     a1 = fig.add_subplot(gs[0, :])
     strip(a1, b, s + 2.0, s + 2.0 + STRIP_SEC, ref_t, "early in the episode")
     a1.legend(fontsize=6.5, loc="lower right", bbox_to_anchor=(1.0, 1.0), ncol=2, frameon=False)
@@ -171,7 +173,7 @@ def episode_page(pdf, plt, ds, name, b, s: float, e: float) -> dict:
     pdf.savefig(fig)
     plt.close(fig)
     return {"set": ds, "record": name, "start": s, "dur": e - s, "rate_sig": rate_sig,
-            "rate_det": rate_det, "unlike": unlike, "template": where}
+            "rate_det": rate_det, "unlike": unlike, "size": size_med, "template": where}
 
 
 def main(argv=None) -> int:
@@ -214,7 +216,7 @@ def main(argv=None) -> int:
     for r in rows:
         print(f"  {r['set']:<5}{r['record']:<6}{tw._mmss(r['start']):>8}{r['dur']:>6.0f} s  rate sig "
               f"{tw._f(r['rate_sig']):>4}  det {tw._f(r['rate_det']):>4}  unlike {tw._f(r['unlike'], '{:.0%}'):>5}"
-              f"  template {r['template']}")
+              f"  size {tw._f(r['size'], '{:.2f}'):>5}  template {r['template']}")
     return 0
 
 

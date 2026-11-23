@@ -4,7 +4,8 @@
     python experiments/template_wct.py --negatives nsrdb      # quicker first look
     python experiments/template_wct.py --max-records 2        # smoke test
     python experiments/template_wct.py --no-gate --workers 6
-    python experiments/template_wct.py --cal strict          # the first run's calibration
+    python experiments/template_wct.py --cal strict           # the first run's calibration
+    python experiments/template_vtac.py                       # the beat test on VTaC
 
 Why
 ---
@@ -22,9 +23,10 @@ rest as a template, and during a fast rhythm every beat is compared with it.
 Beats that keep their usual shape mean a conducted rhythm (sinus, AF, SVT);
 beats that lost it mean a ventricular origin. In the START study (Gold et
 al., J Cardiovasc Electrophysiol 2012) this reached 100% sensitivity for
-VT/VF and 98% specificity for SVT. QRS template matching on Holter recordings separated ventricular
-beats at 98.4% sensitivity and 98.9% specificity (PubMed 17805974). One lead
-is enough: the S-ICD senses one vector. Nothing here is trained.
+VT/VF and 98% specificity for SVT. QRS template matching on Holter recordings
+separated ventricular beats at 98.4% sensitivity and 98.9% specificity
+(PubMed 17805974). One lead is enough: the S-ICD senses one vector. Nothing
+here is trained.
 
 What runs, as the app would run it
 ----------------------------------
@@ -49,30 +51,59 @@ template  calibration, as at patch-on: the first 10 s stretch with a rate of
           brady. It found no template in 14 of 69 records, among them the
           two VFDB records whose pictures show VT from 100 to 150 bpm (607,
           611), so both were missed.
-          "fixed" keeps that template for the whole recording. "adaptive"
-          moves to every later stretch that qualifies, labels not used
-          (posture and electrode changes); no stretch above 100 bpm
-          qualifies, so VT above 100 cannot become the template. Beats for
-          calibration are the newest stride of every window.
-match     each beat: Pearson correlation with the template over 100 ms either
-          side of R, the best of shifts up to 40 ms.
+          The template stays fixed for the whole recording, as at patch-on.
+          A template re-learnt during the recording was tried and dropped:
+          it learnt the VT's own shape (VFDB 420: 98% of the VT's beats
+          unlike the fixed template, 21% unlike the re-learnt one).
+          Beats for calibration are the newest stride of every window.
+match     every beat against the template, three ways:
+            shape  Pearson correlation over 100 ms either side of R, the best
+                   of shifts up to 40 ms (the first runs' only measure)
+            wide   the same from 100 ms before to 250 ms after R, so the T
+                   wave counts too; its template is the median of the same
+                   calibration beats, aligned as the shape aligned them
+            size   the beat's peak-to-peak over the shape span, aligned the
+                   same way, as a share of the template's
+          A beat is unlike the template when its correlation is under C, or,
+          with the size check on, its size is under half or over twice the
+          template's. VFDB 607 is why: its VT beats are a third of the
+          patient's own beat but keep the shape over 200 ms (correlation
+          0.83). The wide span and the factor 2 are ours, tested here.
 rule      at the end of every window, over its last 30 s of beats (the WCT
           rule's span and its 80% share): rate above R (monitor-style trimmed
-          mean, as the rate engine), at least 80% of the beats under
-          correlation C, and optionally the beats alike each other
-          (monomorphic: median correlation with their own median beat at
-          least M). One alert per episode, re-armed after 30 s without the
-          condition, as the decision layer does.
+          mean, as the rate engine) and at least 80% of the beats unlike the
+          template; then optionally:
+            M          the beats alike each other (monomorphic: median
+                       correlation with their own median beat at least M)
+            onset      the fast rhythm began suddenly: where the running rate
+                       (median of 4 RR intervals) first rose above R, the cycle
+                       length fell by 9% or more against the 8 intervals
+                       before. Sinus tachycardia speeds up gradually; VT starts
+                       at once. The newest run with a beat in the 30 s is
+                       judged, so the tail of a gradual run stays held back.
+                       A run that never started suddenly still alerts once it
+                       has lasted 60 s (the ICDs' sustained-rate safety; the
+                       60 s is ours).
+            stability  the rhythm is regular: the median change between
+                       successive RR intervals over the 30 s is 40 ms or less.
+                       VT is regular; AF is not.
+          Onset 9% and stability 40 ms are the ICD settings Brugada et al.
+          (J Cardiovasc Electrophysiol 1998) programmed and found best; there
+          a sustained-rate safety took VT sensitivity from 90% to 100% while
+          specificity for supraventricular rhythms fell from 96% to 83%.
+          One alert per episode, re-armed after 30 s without the condition,
+          as the decision layer does.
 stride    2.5 s on the VT sets (the rate engine's), --neg-stride (5 s) on the
           long negative sets to keep them quick.
 gate      with checkpoints/quality_gate.pt and PyTorch: the 30 s must average
           P(usable) >= 0.90 (GATE_MIN_P morphology), scored on 20 s windows
-          normalised and split into 5 s as the beat path does. Results come
-          with and without it.
+          normalised and split into 5 s as the beat path does.
 
-R is swept at 100 (the definition of VT, the client's figure) and 120 (the
-notification threshold of ambulatory patch monitoring: ARIC, Zio AT); C at
-0.5 (S-ICD's figure), 0.6 and 0.7; M off and 0.7.
+Configurations
+--------------
+The first two runs swept R, C and M. Here each new check is added alone to
+the run-2 rule (R 100, C 0.6, M 0.7), then all of them together, then the
+whole rule with one setting moved at a time (CONFIGS).
 
 Scored
 ------
@@ -84,14 +115,16 @@ the commonest fast rhythm from above) and SVDB (supraventricular
 arrhythmias). Negative sets use their annotated span only, as
 eval_beats_model does for NSRDB. CUDB labels VT in few records (cu02 in the
 first run), so an alert there may be real VT: false alerts are listed with
-record, time and the rhythm label, to be looked at. Pictures of every VT
-episode: experiments/template_wct_plot.py.
+record, time and the rhythm label, to be looked at. VFDB labels much more
+than slow VT as "VT": in the first run's pictures only 611 and part of 607
+were VT from 100 to 150 bpm. Pictures of every VT episode:
+experiments/template_wct_plot.py.
 
-For every VT episode of 30 s or more: the rate on the signal (the peak count
-used to split VT by rate) and from the detector, the share of beats unlike
-the template, and whether the template came from before or after the
-episode. That shows why an episode is missed: the detector, the template or
-the rule.
+For every VT episode of 30 s or more: the rate on the signal and from the
+detector, the share of beats unlike the template by each measure, their
+median size, the rhythm's regularity, the cycle-length drop at its start,
+and whether the template came from before or after the episode. That shows
+why an episode is missed: the detector, the template or the rule.
 
 Reads only. Test-split patients are skipped. Every figure is picked on this
 data: the result says whether the direction works, not the final numbers.
@@ -122,6 +155,7 @@ from munji_ai.rules.rate_engine import _trimmed_mean, detect_beats  # noqa: E402
 WIN_SEC = C.RULES_WINDOW_SEC           # 40 s, the rate engine's window
 POS_STEP = C.RULES_STRIDE_SEC          # 2.5 s, the rate engine's stride
 PRE_SEC = POST_SEC = 0.10              # beat window either side of R
+WIDE_POST_SEC = 0.25                   # "wide": to 250 ms after R, T wave included
 LAG_SEC = 0.04                         # alignment search either side
 CAL_SEC = 10.0                         # calibration stretch
 CAL_BPM = (40.0, 100.0)
@@ -135,11 +169,46 @@ CALS = ("dominant", "strict")
 SUSTAIN = C.VT_SUSTAINED_SEC           # 30 s
 FRACTION = C.VT_SUSTAINED_PVC_FRACTION  # 0.80
 GATE_BLOCK_SEC = C.WINDOW_SEC["quality"]   # 5 s
-RATES = (100.0, 120.0)
-CORRS = (0.5, 0.6, 0.7)
-MONOS = (None, 0.7)
-TEMPLATES = ("fixed", "adaptive")
-SHOW_C, SHOW_M = 0.6, 0.7              # detailed per episode, template "fixed"
+SIZE_FACTOR = 2.0                      # unlike when under 1/2 or over 2 times the template's size
+RUN_RR = 4                             # RR intervals in the running rate that starts a run
+ONSET_BEFORE = 8                       # intervals before the start the drop is measured against
+ONSET_DROP = 0.09                      # sudden: cycle length down 9% or more (Brugada 1998)
+ONSET_OVERRIDE_SEC = 60.0              # a gradual run still alerts after this long (ours)
+STABILITY_MS = 40.0                    # regular: median successive RR change (Brugada 1998)
+
+BASE = {"match": "shape", "size": False, "C": 0.6, "R": 100.0, "M": 0.7,
+        "onset": False, "stab": False, "gate": False}
+ALL = {"size": True, "onset": True, "stab": True}
+
+
+def _cfg(name: str, **kw):
+    return name, {**BASE, **kw}
+
+
+CONFIGS = [
+    _cfg("run 2 rule"),
+    _cfg("+ size", size=True),
+    _cfg("+ wide window", match="wide"),
+    _cfg("+ onset", onset=True),
+    _cfg("+ stability", stab=True),
+    _cfg("all: size, onset, stability", **ALL),
+    _cfg("all, wide window", **ALL, match="wide"),
+    _cfg("all, R 120", **ALL, R=120.0),
+    _cfg("all, C 0.5", **ALL, C=0.5),
+    _cfg("all, C 0.7", **ALL, C=0.7),
+    _cfg("all, no M", **ALL, M=None),
+    _cfg("all, gate on", **ALL, gate=True),
+]
+SHOW = ("run 2 rule", "all: size, onset, stability")   # per episode and false-alert lists
+SHOW_C = BASE["C"]
+
+
+def configs(gated: bool):
+    return [(n, c) for n, c in CONFIGS if gated or not c["gate"]]
+
+
+def _unlike_key(c: dict):
+    return c["match"], c["size"], c["C"]
 
 
 # ------------------------------------------------------------------- beats
@@ -187,6 +256,18 @@ def extended(x: np.ndarray, peaks: np.ndarray, fs: int):
     if p.size == 0:
         return p, np.zeros((0, L + 2 * lag))
     return p, x[(p - pre - lag)[:, None] + np.arange(L + 2 * lag)[None, :]]
+
+
+def wide_windows(x: np.ndarray, peaks: np.ndarray, fs: int):
+    """(Lw, (n, Lw + 2 lag) float32): the wide span around every peak, the
+    recording's edges padded so the rows stay aligned with peaks. Each row
+    starts where extended()'s does, so the same shift aligns both."""
+    pre, _, lag = _sizes(fs)
+    Lw = pre + int(round(WIDE_POST_SEC * fs)) + 1
+    pad = Lw + 2 * lag
+    xp = np.pad(np.asarray(x, np.float32), (pad, pad), mode="edge")
+    start = np.asarray(peaks, np.int64) - pre - lag + pad
+    return Lw, xp[start[:, None] + np.arange(Lw + 2 * lag)[None, :]]
 
 
 def _z(a: np.ndarray) -> np.ndarray:
@@ -240,6 +321,46 @@ def dominant_template(ext: np.ndarray, L: int, lag: int):
     _, k = best_corr(ext[good], ext[m, lag:lag + L], with_shift=True)
     w = np.lib.stride_tricks.sliding_window_view(ext[good], L, axis=1)
     return np.median(w[np.arange(int(good.sum())), k], axis=0)
+
+
+def wide_template(ext: np.ndarray, wext: np.ndarray, tpl: np.ndarray, Lw: int):
+    """The wide template: the median wide span of the calibration beats that
+    match the shape template, each shifted as the shape match shifted it."""
+    if len(ext) == 0:
+        return None
+    r, k = best_corr(ext, tpl, with_shift=True)
+    good = r >= CAL_MATCH
+    if good.sum() < 3:
+        return None
+    w = np.lib.stride_tricks.sliding_window_view(wext[good], Lw, axis=1)
+    return np.median(w[np.arange(int(good.sum())), k[good]], axis=0)
+
+
+def match(ext: np.ndarray, wext: np.ndarray, tpl, tplw, L: int, Lw: int) -> dict:
+    """Every beat against the template: shape and wide correlation, size
+    ratio. NaN where there is no template."""
+    n = len(ext)
+    out = {k: np.full(n, np.nan) for k in ("shape", "wide", "size")}
+    if tpl is None or n == 0:
+        return out
+    r, k = best_corr(ext, tpl, with_shift=True)
+    out["shape"] = r
+    aligned = np.lib.stride_tricks.sliding_window_view(ext, L, axis=1)[np.arange(n), k]
+    out["size"] = np.ptp(aligned, axis=1) / max(float(np.ptp(tpl)), 1e-9)
+    if tplw is not None:
+        out["wide"] = best_corr(wext, tplw)
+    return out
+
+
+def unlike(feat: dict, key) -> np.ndarray:
+    """Per beat: unlike the template by (match, size check, C). No template
+    (NaN) is never unlike."""
+    m, size, c = key
+    with np.errstate(invalid="ignore"):
+        u = feat["wide" if m == "wide" else "shape"] < c
+        if size:
+            u |= (feat["size"] < 1.0 / SIZE_FACTOR) | (feat["size"] > SIZE_FACTOR)
+    return u
 
 
 def self_alike(ext: np.ndarray, L: int, lag: int) -> float:
@@ -296,6 +417,65 @@ def why_no_template(n: dict) -> str:
             f"{CAL_BPM[1]:.0f} bpm, {n['shape']} of one main shape, {n['allowed']} in an allowed rhythm")
 
 
+# ------------------------------------------------------------ onset, rhythm
+def onset_runs(ts: np.ndarray, R: float):
+    """Per stream beat, for the rate R: the index of the first beat of the
+    fast run it is in (-1 if the running rate is not above R), and per run
+    start the drop in cycle length there (NaN: not enough beats before)."""
+    n = len(ts)
+    start = np.full(n, -1, np.int64)
+    drop = {}
+    if n <= RUN_RR:
+        return start, drop
+    rr = np.diff(ts)
+    run = np.full(n, np.nan)
+    run[RUN_RR:] = np.median(np.lib.stride_tricks.sliding_window_view(rr, RUN_RR), axis=1)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        fast = 60.0 / run > R
+    s0 = -1
+    for i in range(n):
+        if fast[i]:
+            if s0 < 0:
+                s0 = i
+                a = s0 - RUN_RR - ONSET_BEFORE
+                drop[s0] = (1.0 - run[s0] / float(np.median(rr[a:s0 - RUN_RR]))) if a >= 0 else np.nan
+            start[i] = s0
+        else:
+            s0 = -1
+    return start, drop
+
+
+def onset_ok(t_end: np.ndarray, ts: np.ndarray, start: np.ndarray, drop: dict) -> np.ndarray:
+    """Per window end: does the onset check let an alert through? It judges
+    the newest fast run with a beat in the window's last 30 s, so the tail of
+    a gradual run, where the 30 s rate is still above R after the run ended,
+    stays held back. Yes when there is no such run (the 30 s rule judges the
+    rate), when the run began suddenly or cannot be judged, or when it has
+    lasted ONSET_OVERRIDE_SEC."""
+    out = np.ones(len(t_end), bool)
+    if len(ts) == 0:
+        return out
+    newest = np.maximum.accumulate(np.where(start >= 0, np.arange(len(ts)), -1))
+    i_last = np.searchsorted(ts, t_end, side="right") - 1
+    for w, i in enumerate(i_last):
+        j = int(newest[i]) if i >= 0 else -1
+        if j < 0 or ts[j] <= t_end[w] - SUSTAIN:
+            continue
+        s0 = int(start[j])
+        d = drop.get(s0, np.nan)
+        if np.isfinite(d) and d < ONSET_DROP and ts[j] - ts[s0] < ONSET_OVERRIDE_SEC:
+            out[w] = False
+    return out
+
+
+def instability_ms(beat_samples: np.ndarray, fs: int) -> float:
+    """Median change between successive RR intervals, ms."""
+    if beat_samples.size < 4:
+        return float("nan")
+    rr = np.diff(beat_samples) / fs
+    return float(np.median(np.abs(np.diff(rr))) * 1000.0)
+
+
 # -------------------------------------------------------------------- gate
 def gate_blocks(x: np.ndarray, ckpt: Path) -> np.ndarray:
     """P(usable) of every 5 s block, from 20 s windows as the beat path."""
@@ -309,20 +489,21 @@ def gate_blocks(x: np.ndarray, ckpt: Path) -> np.ndarray:
 
 
 # ----------------------------------------------------------------- decisions
-def decision_table(ends, wbeats, pos, corr: dict, ext, L, lag, fs, gate_p) -> dict:
+def decision_table(ends, wbeats, pos, u: dict, ext, L, lag, fs, gate_p) -> dict:
     """What the rules need, at the end of every window, over its last 30 s.
 
-    The share of unlike beats is computed for every window; the rate and the
-    monomorphic check only where some rule could fire, which is rare away
-    from VT and keeps 24 h records quick.
+    The share of unlike beats is computed for every window and every unlike
+    definition; the rate, the monomorphic check and the regularity only where
+    some rule could fire, which is rare away from VT and keeps 24 h records
+    quick.
     """
     n = len(ends)
     t_end = ends / fs
     ok = np.zeros(n, bool)
-    frac = {k: np.full((n, len(CORRS)), np.nan) for k in corr}
-    bpm, mono = np.full(n, np.nan), np.full(n, np.nan)
-    cuts = np.asarray(CORRS)[None, :]
+    frac = {k: np.full(n, np.nan) for k in u}
+    bpm, mono, stab = np.full(n, np.nan), np.full(n, np.nan), np.full(n, np.nan)
     S30 = int(SUSTAIN * fs)
+    rmin = min(c["R"] for _, c in CONFIGS)
     for w in range(n):
         b = wbeats[w]
         b = b[b >= ends[w] - S30]
@@ -333,15 +514,15 @@ def decision_table(ends, wbeats, pos, corr: dict, ext, L, lag, fs, gate_p) -> di
             continue
         ok[w] = True
         top = -1.0
-        for k, cr in corr.items():
-            f = (cr[idx][:, None] < cuts).mean(axis=0)      # NaN (no template) is never unlike
-            frac[k][w] = f
-            top = max(top, float(f[-1]))
+        for k, uk in u.items():
+            frac[k][w] = float(np.mean(uk[idx]))
+            top = max(top, frac[k][w])
         if top >= FRACTION:
             m = _trimmed_mean(np.sort(np.diff(b) / fs), C.RATE_RUN_TRIM)
             bpm[w] = 60.0 / m if m > 0 else np.nan
-            if bpm[w] > min(RATES):
+            if bpm[w] > rmin:
                 mono[w] = self_alike(ext[idx], L, lag)
+                stab[w] = instability_ms(b, fs)
     usable = None
     if gate_p is not None:
         cs = np.concatenate([[0.0], np.cumsum(gate_p)])
@@ -350,7 +531,8 @@ def decision_table(ends, wbeats, pos, corr: dict, ext, L, lag, fs, gate_p) -> di
         usable = np.zeros(n, bool)
         v = (b1 <= len(gate_p)) & (b1 > b0)
         usable[v] = (cs[b1[v]] - cs[b0[v]]) / (b1[v] - b0[v]) >= C.GATE_MIN_P["morphology"]
-    return {"t": t_end, "ok": ok, "bpm": bpm, "mono": mono, "frac": frac, "usable": usable}
+    return {"t": t_end, "ok": ok, "bpm": bpm, "mono": mono, "stab": stab, "frac": frac,
+            "usable": usable}
 
 
 def alert_times(t: np.ndarray, cond: np.ndarray, step: float) -> np.ndarray:
@@ -363,27 +545,23 @@ def alert_times(t: np.ndarray, cond: np.ndarray, step: float) -> np.ndarray:
     return tt[np.concatenate([[True], np.diff(tt) > SUSTAIN + step + 1e-6])]
 
 
-def combos(gated: bool):
-    for g in ((False, True) if gated else (False,)):
-        for tpl in TEMPLATES:
-            for R in RATES:
-                for ci, c in enumerate(CORRS):
-                    for M in MONOS:
-                        yield g, tpl, R, ci, c, M
-
-
-def combo_alerts(dec: dict, tpl: str, R: float, ci: int, M, gated: bool, step: float) -> np.ndarray:
-    cond = dec["ok"] & (dec["frac"][tpl][:, ci] >= FRACTION) & (dec["bpm"] > R)
-    if M is not None:
-        cond &= dec["mono"] >= M
-    if gated:
+def config_alerts(dec: dict, onset: dict, c: dict, step: float) -> np.ndarray:
+    with np.errstate(invalid="ignore"):
+        cond = dec["ok"] & (dec["frac"][_unlike_key(c)] >= FRACTION) & (dec["bpm"] > c["R"])
+        if c["M"] is not None:
+            cond &= dec["mono"] >= c["M"]
+        if c["stab"]:
+            cond &= dec["stab"] <= STABILITY_MS
+    if c["onset"]:
+        cond &= onset[c["R"]]
+    if c["gate"]:
         cond &= dec["usable"]
     return alert_times(dec["t"], cond, step)
 
 
 # ------------------------------------------------------------------ record
 def beats_and_template(rec, step: float, annotated_span: bool = False, mode: str = "dominant") -> dict:
-    """Beats, templates and correlations of one record, as the app would get
+    """Beats, templates and the match of every beat, as the app would get
     them. Shared by process() and template_wct_plot.py. mode: the
     calibration, "dominant" or "strict" (CALS).
 
@@ -396,8 +574,9 @@ def beats_and_template(rec, step: float, annotated_span: bool = False, mode: str
     cal, first   every calibration stretch that qualifies (start, end,
                  template) and the one used as patch-on (None: no template)
     cal_counts   stretches, then with the rate, one shape, an allowed rhythm
-    corr         per position in pos: correlation with the fixed and the
-                 adaptive template (NaN without a template)
+    wide         the wide template (None without one)
+    corr         per position in pos: "shape" and "wide" correlation and the
+                 "size" ratio against the fixed template (NaN without one)
     """
     fs = rec.fs
     lo, hi = 0, len(rec.signal)
@@ -412,6 +591,7 @@ def beats_and_template(rec, step: float, annotated_span: bool = False, mode: str
     sb = stream(ends, wbeats, step, fs)
     every = np.unique(np.concatenate([sb] + wbeats)) if wbeats else sb
     pos, ext = extended(x, every, fs)
+    Lw, wext = wide_windows(x, pos, fs)
     tpos = pos / fs
     si = index_of(pos, sb)                     # the stream, as indices into pos
     ts = tpos[si]
@@ -426,32 +606,32 @@ def beats_and_template(rec, step: float, annotated_span: bool = False, mode: str
     counts["allowed"] = len(allowed)
     first = allowed[0] if allowed else None
 
-    corr = {k: np.full(len(pos), np.nan) for k in TEMPLATES}
+    tplw = None
     if first is not None:
-        corr["fixed"] = best_corr(ext, first[2])
-        tpls = [first] + [c for c in cal if c[0] >= first[1]]
-        which = np.clip(np.searchsorted(np.array([c[1] for c in tpls]), tpos, side="right") - 1, 0, None)
-        bounds = np.searchsorted(which, np.arange(len(tpls) + 1))   # tpos is sorted, so is which
-        for k in range(len(tpls)):
-            a, b = bounds[k], bounds[k + 1]
-            if b > a:
-                corr["adaptive"][a:b] = best_corr(ext[a:b], tpls[k][2])
-    return {"x": x, "fs": fs, "ivs": ivs, "L": L, "lag": lag, "ends": ends, "wbeats": wbeats,
-            "pos": pos, "ext": ext, "si": si, "ts": ts, "cal": cal, "first": first, "corr": corr,
-            "cal_counts": counts}
+        cal_idx = si[(ts >= first[0]) & (ts < first[1])]
+        tplw = wide_template(ext[cal_idx], wext[cal_idx], first[2], Lw)
+    corr = match(ext, wext, first[2] if first else None, tplw, L, Lw)
+    return {"x": x, "fs": fs, "ivs": ivs, "L": L, "Lw": Lw, "lag": lag, "ends": ends,
+            "wbeats": wbeats, "pos": pos, "ext": ext, "si": si, "ts": ts, "cal": cal,
+            "first": first, "wide": tplw, "corr": corr, "cal_counts": counts}
 
 
 def process(rec, gate_ckpt, annotated_span: bool, step: float, mode: str = "dominant") -> dict:
     b = beats_and_template(rec, step, annotated_span, mode)
     x, fs, ivs, L, lag = b["x"], b["fs"], b["ivs"], b["L"], b["lag"]
     ends, wbeats, pos, ext = b["ends"], b["wbeats"], b["pos"], b["ext"]
-    si, ts, cal, first, corr = b["si"], b["ts"], b["cal"], b["first"], b["corr"]
+    si, ts, first, corr = b["si"], b["ts"], b["first"], b["corr"]
+    gated = gate_ckpt is not None
+    cfgs = configs(gated)
 
-    gate_p = gate_blocks(x, gate_ckpt) if gate_ckpt is not None else None
-    dec = decision_table(ends, wbeats, pos, corr, ext, L, lag, fs, gate_p)
-    alerts = {(g, tpl, R, ci, M): combo_alerts(dec, tpl, R, ci, M, g, step)
-              for g, tpl, R, ci, _, M in combos(gate_p is not None)}
+    u = {k: unlike(corr, k) for k in {_unlike_key(c) for _, c in cfgs}}
+    gate_p = gate_blocks(x, gate_ckpt) if gated else None
+    dec = decision_table(ends, wbeats, pos, u, ext, L, lag, fs, gate_p)
+    runs = {R: onset_runs(ts, R) for R in {c["R"] for _, c in cfgs}}
+    onset = {R: onset_ok(dec["t"], ts, *runs[R]) for R in runs}
+    alerts = {name: config_alerts(dec, onset, c, step) for name, c in cfgs}
 
+    start100, drop100 = runs[BASE["R"]]
     episodes = []
     for s, e, lab in ivs:
         if lab != "VT":
@@ -460,22 +640,31 @@ def process(rec, gate_ckpt, annotated_span: bool, step: float, mode: str = "domi
         k = si[i:j]
         ref = _episode_bpm(x[int(s * fs):int(e * fs)], fs)
         has = first is not None and k.size > 0
+        near = [d for s0, d in drop100.items() if s - 10.0 <= ts[s0] <= s + SUSTAIN]
+
+        def share(key, k=k, has=has):
+            return float(np.mean(unlike(corr, key)[k])) if has else float("nan")
+
         episodes.append({
             "s": s, "e": e, "dur": e - s,
             "rate_sig": float(ref) if ref else float("nan"),
             "rate_det": float(60.0 / np.median(np.diff(ts[i:j]))) if j - i >= 3 else float("nan"),
             "beats": int(j - i),
-            "unlike": float(np.mean(corr["fixed"][k] < SHOW_C)) if has else float("nan"),
-            "unlike_adapt": float(np.mean(corr["adaptive"][k] < SHOW_C)) if has else float("nan"),
-            "corr": float(np.median(corr["fixed"][k])) if has else float("nan"),
+            "unlike": share(("shape", False, SHOW_C)),
+            "unlike_size": share(("shape", True, SHOW_C)),
+            "unlike_wide": share(("wide", False, SHOW_C)),
+            "size": float(np.nanmedian(corr["size"][k])) if has else float("nan"),
+            "corr": float(np.median(corr["shape"][k])) if has else float("nan"),
             "alike": self_alike(ext[k], L, lag),
+            "stab": instability_ms(pos[k], fs) if k.size else float("nan"),
+            "onset": near[0] if near else float("nan"),
             "template": "none" if first is None else ("before" if first[1] <= s else "after")})
     usable_share = float("nan")
-    if gate_p is not None and dec["ok"].any():
+    if gated and dec["ok"].any():
         usable_share = float(np.mean(dec["usable"][dec["ok"]]))
     return {"dataset": rec.dataset, "name": rec.name, "patient": rec.patient,
             "hours": len(x) / fs / 3600.0, "n_beats": int(len(ts)), "ivs": ivs,
-            "first": first[1] if first else None, "n_cal": len(cal), "cal_counts": b["cal_counts"],
+            "first": first[1] if first else None, "n_cal": len(b["cal"]), "cal_counts": b["cal_counts"],
             "alerts": alerts, "episodes": episodes, "usable_share": usable_share}
 
 
@@ -504,11 +693,11 @@ def classify(a: float, ivs) -> str:
     return "other:" + lab
 
 
-def score(results: list, g, tpl, R, ci, M) -> dict:
+def score(results: list, name: str) -> dict:
     out = {"long": [0, 0], "short": [0, 0], "vf": 0, "false": defaultdict(int),
            "false_list": [], "caught": {}}
     for r in results:
-        al = r["alerts"][(g, tpl, R, ci, M)]
+        al = r["alerts"][name]
         for ep in r["episodes"]:
             hit = al[(al >= ep["s"]) & (al <= ep["e"] + SUSTAIN)]
             key = "long" if ep["dur"] >= SUSTAIN else "short"
@@ -550,24 +739,24 @@ def report(results: list, gated: bool) -> None:
         us = [r["usable_share"] for r in results if np.isfinite(r["usable_share"])]
         print(f"gate: {np.mean(us):.0%} of 30 s decisions usable (mean over records)")
 
-    sc = {(g, tpl, R, ci, M): score(results, g, tpl, R, ci, M) for g, tpl, R, ci, c, M in combos(gated)}
-    ci_show = CORRS.index(SHOW_C)
+    cfgs = configs(gated)
+    sc = {name: score(results, name) for name, _ in cfgs}
 
-    print(f"\nVT episodes of 30 s or more, one by one (template fixed, alerts at C {SHOW_C} M {SHOW_M}, "
-          f"no gate; times from the start of the record)")
-    print(f"{'set':<7}{'record':<9}{'start':>8}{'dur':>6}{'rate sig':>9}{'rate det':>9}{'beats':>7}"
-          f"{'unlike':>8}{'adapt':>7}{'corr':>6}{'alike':>7}{'template':>10}{'R100':>6}{'R120':>6}")
+    print("\nVT episodes of 30 s or more, one by one (template fixed; times from the start of the record)")
+    print(f"{'set':<6}{'record':<8}{'start':>7}{'dur':>5}{'rate':>6}{'det':>5}{'beats':>6}{'shape':>7}"
+          f"{'+size':>7}{'wide':>6}{'size':>6}{'stab':>6}{'onset':>7}{'template':>9}{'run 2':>7}{'all':>6}")
     for r, ep in long_:
         k = (r["dataset"], r["name"], ep["s"])
-        c100 = sc[(False, "fixed", 100.0, ci_show, SHOW_M)]["caught"][k]
-        c120 = sc[(False, "fixed", 120.0, ci_show, SHOW_M)]["caught"][k]
-        print(f"{r['dataset']:<7}{r['name']:<9}{_mmss(ep['s']):>8}{ep['dur']:>6.0f}{_f(ep['rate_sig']):>9}"
-              f"{_f(ep['rate_det']):>9}{ep['beats']:>7}{_f(ep['unlike'], '{:.0%}'):>8}"
-              f"{_f(ep['unlike_adapt'], '{:.0%}'):>7}{_f(ep['corr'], '{:.2f}'):>6}"
-              f"{_f(ep['alike'], '{:.2f}'):>7}{ep['template']:>10}{_f(c100):>6}{_f(c120):>6}")
-    print(f"(unlike / adapt: share of beats under correlation {SHOW_C} with the fixed / adaptive template;"
-          "\n corr: their median correlation with the fixed one; alike: with their own median beat;"
-          "\n R100 / R120: seconds from the episode start to the alert, '-' none)")
+        a, b = (sc[n]["caught"][k] for n in SHOW)
+        print(f"{r['dataset']:<6}{r['name']:<8}{_mmss(ep['s']):>7}{ep['dur']:>5.0f}{_f(ep['rate_sig']):>6}"
+              f"{_f(ep['rate_det']):>5}{ep['beats']:>6}{_f(ep['unlike'], '{:.0%}'):>7}"
+              f"{_f(ep['unlike_size'], '{:.0%}'):>7}{_f(ep['unlike_wide'], '{:.0%}'):>6}"
+              f"{_f(ep['size'], '{:.2f}'):>6}{_f(ep['stab']):>6}{_f(ep['onset'], '{:.0%}'):>7}"
+              f"{ep['template']:>9}{_f(a):>7}{_f(b):>6}")
+    print(f"(rate / det: rate on the signal and from the detector; shape / +size / wide: share of beats unlike"
+          f"\n the template, C {SHOW_C}; size: median beat size against the template's; stab: median successive"
+          f"\n RR change, ms; onset: cycle-length drop where the rate first rose above 100; run 2 / all:"
+          f"\n seconds from the episode start to the alert of '{SHOW[0]}' and '{SHOW[1]}', '-' none)")
     for name, g in (("30 s or more", long_), ("under 30 s", short)):
         if not g:
             continue
@@ -579,29 +768,27 @@ def report(results: list, gated: bool) -> None:
         exp = sum(ep["rate_sig"] * ep["dur"] / 60.0 for _, ep in g if np.isfinite(ep["rate_sig"]))
         got = sum(ep["beats"] for _, ep in g if np.isfinite(ep["rate_sig"]))
         print(f"{name}: {len(g)} episodes, {len({r['patient'] for r, _ in g})} patients. Medians: rate "
-              f"signal {_f(med('rate_sig'))}, detector {_f(med('rate_det'))}; unlike fixed "
-              f"{_f(med('unlike'), '{:.0%}')}, adaptive {_f(med('unlike_adapt'), '{:.0%}')}; alike "
-              f"{_f(med('alike'), '{:.2f}')}. Beats found / expected from the signal rate: "
-              + (f"{got / exp:.0%}" if exp else "-"))
-    print("Reading: 'rate det' far under 'rate sig' -> the detector misses VT beats; a low 'unlike' -> the"
-          "\nbeats keep the template's shape; 'template after' -> calibrated later in the record than"
-          "\nthe episode.")
+              f"signal {_f(med('rate_sig'))}, detector {_f(med('rate_det'))}; unlike by shape "
+              f"{_f(med('unlike'), '{:.0%}')}, with size {_f(med('unlike_size'), '{:.0%}')}, wide "
+              f"{_f(med('unlike_wide'), '{:.0%}')}; stab {_f(med('stab'))} ms. Beats found / expected "
+              f"from the signal rate: " + (f"{got / exp:.0%}" if exp else "-"))
 
-    print(f"\nThe rule swept. VT columns: episodes alerted / episodes ({len(long_)} of 30 s or more, "
-          f"{len(short)} shorter). False alerts per 24 h.")
+    print(f"\nEach check added to the run-2 rule, then all together. VT columns: episodes alerted / episodes "
+          f"({len(long_)} of 30 s or more, {len(short)} shorter). False alerts per 24 h.")
     sets = list(hours)
-    print(f"{'gate':<5}{'template':<9}{'R':>4}{'C':>5}{'M':>5}{'VT>=30s':>9}{'VT<30s':>8}{'in VF':>7}"
-          + "".join(f"{s:>9}" for s in sets))
-    for g, tpl, R, ci, c, M in combos(gated):
-        s = sc[(g, tpl, R, ci, M)]
-        print(f"{('on' if g else 'off'):<5}{tpl:<9}{R:>4.0f}{c:>5.1f}{('-' if M is None else f'{M:.1f}'):>5}"
-              f"{s['long'][0]:>5}/{s['long'][1]:<3}{s['short'][0]:>4}/{s['short'][1]:<3}{s['vf']:>7}"
-              + "".join(f"{s['false'][d] / (hours[d] / 24.0):>9.2f}" for d in sets))
+    print(f"{'configuration':<30}{'VT>=30s':>9}{'VT<30s':>8}{'in VF':>7}" + "".join(f"{s:>9}" for s in sets))
+    for name, _ in cfgs:
+        s = sc[name]
+        print(f"{name:<30}{s['long'][0]:>5}/{s['long'][1]:<3}{s['short'][0]:>4}/{s['short'][1]:<3}"
+              f"{s['vf']:>7}" + "".join(f"{s['false'][d] / (hours[d] / 24.0):>9.2f}" for d in sets))
+    print(f"(R {BASE['R']:.0f}, C {BASE['C']}, M {BASE['M']} unless the name says; size: unlike under 1/"
+          f"{SIZE_FACTOR:.0f} or over {SIZE_FACTOR:.0f} times the template's size;"
+          f"\n onset: cycle length down {ONSET_DROP:.0%} at the run's start, or the run has lasted "
+          f"{ONSET_OVERRIDE_SEC:.0f} s; stability: successive RR change {STABILITY_MS:.0f} ms or less)")
 
-    for R in RATES:
-        s = sc[(False, "fixed", R, ci_show, SHOW_M)]
-        fl = s["false_list"]
-        print(f"\nFalse alerts, template fixed, R {R:.0f}, C {SHOW_C}, M {SHOW_M}, no gate: {len(fl)}"
+    for name in SHOW:
+        fl = sc[name]["false_list"]
+        print(f"\nFalse alerts, '{name}': {len(fl)}"
               + (" (most first; record: count, then time and rhythm label at the alert)" if fl else ""))
         by_rec = defaultdict(list)
         for d, n, a, lab in fl:
