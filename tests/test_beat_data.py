@@ -179,6 +179,12 @@ def main():
         W.iter_records = real_iter
     check("the patient seed is the same in every run", W.patient_seed(0, "x") == W.patient_seed(0, "x")
           and W.patient_seed(0, "x") != W.patient_seed(0, "y"))
+    ws = [np.random.default_rng(i).normal(0, 3, 5000) for i in range(20)]
+    at_once = np.asarray(ws, dtype=C.CACHE_DTYPE)
+    each = np.asarray([np.asarray(w, dtype=C.CACHE_DTYPE) for w in ws], dtype=C.CACHE_DTYPE)
+    check("casting each window as it comes equals casting all at the end",
+          at_once.dtype == each.dtype and np.array_equal(at_once.view(np.uint16), each.view(np.uint16)),
+          "bit for bit")
 
     print("\n" + ("ALL CHECKS PASSED" if ok else "FAILURES ABOVE"))
     return 0 if ok else 1

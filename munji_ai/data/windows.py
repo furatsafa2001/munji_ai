@@ -509,7 +509,10 @@ def build_stage(stage: str, manifest: dict, out_dir: Path | None = None,
                 xs, ys, offs = out
                 room = budget - len(X)
                 xs, ys, offs = xs[:room], ys[:room], offs[:room]
-                X.extend(xs)
+                # Stored at the cache's precision as they arrive. Held as the
+                # float64 normalize returns, 100k beat windows took 4 GB before
+                # the final cast; casting each now gives the same values.
+                X.extend(np.asarray(x, dtype=C.CACHE_DTYPE) for x in xs)
                 Y.extend(ys)
                 if split_beat:
                     # Normal windows count against the cap, ectopic windows
