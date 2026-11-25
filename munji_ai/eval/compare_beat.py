@@ -1,7 +1,7 @@
 """Compare beat-model checkpoints on the same windows and the same records.
 
     python -m munji_ai.eval.compare_beat
-    python -m munji_ai.eval.compare_beat --ckpt v2=checkpoints/beat_segmenter.pt --ckpt v3=checkpoints/v3/beat_segmenter.pt
+    python -m munji_ai.eval.compare_beat --ckpt v2=checkpoints/v2/beat_segmenter.pt --ckpt v3=checkpoints/v3/beat_segmenter.pt
     python -m munji_ai.eval.compare_beat --part val --limit 2000      # a quick look
 
 Every model is scored on identical inputs, so a difference between columns is
@@ -64,7 +64,7 @@ WIDE_RECORDS = (("mitdb", "109", "left bundle branch block"),
                 ("mitdb", "118", "right bundle branch block"),
                 ("incartdb", "I70", "WPW, wide supraventricular beats"),
                 ("incartdb", "I71", "WPW, AF, bundle branch blocks"))
-DEFAULT_CKPTS = ("v2=checkpoints/beat_segmenter.pt", "v3=checkpoints/v3/beat_segmenter.pt")
+DEFAULT_CKPTS = ("v2=checkpoints/v2/beat_segmenter.pt", "v3=checkpoints/v3/beat_segmenter.pt")
 
 
 class Model:
