@@ -415,20 +415,27 @@ def main() -> int:
     r = dl.report()["fast_narrow"]
     check("a report event is an entry, never an alert; a template event is not this layer's",
           len(r["alerts"]) == 1 and [t for t, _ in r["entries"]] == [167.5] and r["held"] == 0, str(r))
-    check("no ECG strip is asked for (not an emergency alert)", dl.take_recording_requests() == [])
+    req = dl.take_recording_requests()
+    check("the alert asks for its ECG: 30 s before to 30 s after",
+          [(r.reason, r.start, r.end) for r in req] == [("fast_narrow", 137.5, 197.5)]
+          and out[0].evidence.get("save_ecg") == {"start": 137.5, "end": 197.5}, str(req))
     dl = DecisionLayer()
     out = dl.on_fast_narrow([Ev("report", 300.0, **nums)])
     check("a late report event (the run had to end first) is entered with its own time",
           out == [] and dl.report()["fast_narrow"]["entries"][0][0] == 300.0)
+    check("... and asks for no ECG (report only)", dl.take_recording_requests() == [])
     dl = DecisionLayer()
     run_shock(dl, [0.9], chaotic())
     out = dl.on_fast_narrow([Ev("alert", 5.0, **nums), Ev("report", 5.0, **nums)])
     check("ShockableNet saw danger in the last 6 windows: alert and entry held (never SVT for a possible VT)",
           out == [] and dl.report()["fast_narrow"] == {"alerts": [], "entries": [], "held": 2})
+    check("... a held alert asks for no fast_narrow ECG",
+          all(r.reason != "fast_narrow" for r in dl.take_recording_requests()))
     dl = DecisionLayer()
     out = dl.on_fast_narrow([Ev("alert", 5.0, **nums)], usable=False)
     out += dl.on_fast_narrow([Ev("alert", 50.0, **nums)], lead_off=True)
     check("a window the gate rejects, or leads off: held", out == [] and dl.report()["fast_narrow"]["held"] == 2)
+    check("... and asks for no ECG", dl.take_recording_requests() == [])
     out = dl.on_fast_narrow([Ev("alert", 100.0, **nums)], usable=True, lead_off=None)
     check("leads unknown, gate accepts: sent", kinds(out) == ["fast_narrow"])
     dl = DecisionLayer()
@@ -437,9 +444,19 @@ def main() -> int:
     r = dl.report()["fast_narrow"]
     check("a sustained-tachycardia notification is open: no second page, the alert goes to the report",
           kinds(told) == ["sustained_tachycardia"] and out == [] and len(r["entries"]) == 1 and not r["alerts"])
+    req = dl.take_recording_requests()
+    check("... its ECG is still kept (same episode)",
+          [(r.reason, r.t, r.start, r.end) for r in req] == [("fast_narrow", 20.0, -10.0, 50.0)], str(req))
     run_rate(dl, [rate()] * 6, t0=20.0)
     out = dl.on_fast_narrow([Ev("alert", 60.0, **nums)])
     check("once that episode is over, the alert is sent again", kinds(out) == ["fast_narrow"])
+    dl = DecisionLayer()
+    out = []
+    for t in (100.0, 400.0, 3600.0, 7200.0, 30000.0):
+        out += dl.on_fast_narrow([Ev("alert", t, **nums)])
+    req = dl.take_recording_requests()
+    check("every episode is alerted, no daily limit, each with its ECG",
+          kinds(out) == ["fast_narrow"] * 5 and [r.t for r in req] == [100.0, 400.0, 3600.0, 7200.0, 30000.0])
 
     print("\n" + ("ALL CHECKS PASSED" if ok else "FAILURES ABOVE"))
     return 0 if ok else 1

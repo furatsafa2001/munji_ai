@@ -155,9 +155,10 @@ ECTOPY_PATTERN_MIN_CYCLES = 3
 # over the jitter of a mask centre between windows.
 BEAT_DEDUP_SEC = 0.15
 
-# ECG saved around an emergency alert (VF/VT, asystole, sustained VT): the
-# decision layer asks, the app saves. Team decision to auto-save a short strip
-# around critical events so the doctor sees what triggered the alert.
+# ECG saved around an emergency alert (VF/VT, asystole, sustained VT) and the
+# SVT alert (fast_narrow): the decision layer asks, the app saves. Team decision
+# to auto-save a short strip around these events so the doctor sees what
+# triggered the alert; for SVT, the client's request (26 November 2026).
 ECG_SAVE_BEFORE_SEC = 30.0
 ECG_SAVE_AFTER_SEC = 30.0
 

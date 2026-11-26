@@ -196,6 +196,12 @@ def through_decision_layer() -> None:
         r = dl.report()["fast_narrow"]
         got = (sum(a.kind == "fast_narrow" for a in alerts), len(r["entries"]))
         check(f"{label}: fast_narrow alerts and report entries {want}", got == want, str(got))
+        if want[0]:
+            req = dl.take_recording_requests()
+            onset = F.REST[2]                  # the SVT starts after 150 s of rest
+            check(f"{label}: the ECG kept holds the start",
+                  len(req) == want[0] and all(q.start < onset < q.t for q in req),
+                  str([(q.start, q.t, q.end) for q in req]))
 
 
 def real(keys) -> None:

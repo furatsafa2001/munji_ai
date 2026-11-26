@@ -221,6 +221,14 @@ window is not usable or the leads are off (noise invents beats). It does not
 page twice for one fast heartbeat: while a sustained-tachycardia
 notification (180 held 30 s) is open, the alert goes to the report instead.
 
+**Alerts and the ECG** (decided 26 November 2026, at the client's request).
+Every episode is alerted, with no daily limit (AF has one a day). Every alert
+keeps the ECG from 30 s before to 30 s after it, so a doctor can confirm the
+SVT; the 30 s before hold the start, because the alert comes 15 to 23 s into
+an abrupt run (synthetic SVT at 155 to 220 bpm). An alert that went to the
+report because a rate notification was open still keeps its ECG: same
+episode. Report entries keep none.
+
 **Checked against the experiment** (`tests/test_beat_match.py`,
 `tests/test_fast_narrow_tracker.py`): the same template, the same alerts and
 the same report entries at the same times, on 14 synthetic records (template

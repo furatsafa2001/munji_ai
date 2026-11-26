@@ -104,7 +104,9 @@ Fast narrow rhythm (rules/fast_narrow.FastNarrowTracker, every 2.5 s)
 
         "alert"     a sudden fast regular rhythm with the usual beat shape:
                     alert "fast_narrow", warning ("possible SVT"). The tracker
-                    already sends one per episode.
+                    already sends one per episode, and every episode is
+                    alerted: no daily limit, unlike AF (the client's request,
+                    26 November 2026). The ECG around it is kept (ECG saving).
         "report"    an entry in the doctor's report, never an alert. It may
                     come minutes after its time: the tracker waits for the
                     run to end, to see whether it ended abruptly.
@@ -117,7 +119,9 @@ Fast narrow rhythm (rules/fast_narrow.FastNarrowTracker, every 2.5 s)
         and noise invents beats (as for the rate findings);
       for the alert only, a sustained-tachycardia notification (180 held
         30 s) is open: the person has already been told about this fast
-        heartbeat, so it goes to the report instead of paging twice.
+        heartbeat, so it goes to the report instead of paging twice. Its
+        ECG is still kept: it is the same episode, and the rate notification
+        keeps none.
 
 Beats (BeatSegmenter, every beat window)
     Each beat arrives as (time in seconds, "N" | "PAC" | "PVC");
@@ -148,9 +152,12 @@ Beats (BeatSegmenter, every beat window)
     unit repeats 3 times in a row; a PAC or a gap breaks it.
 
 ECG saving
-    Every emergency alert (VF/VT, asystole, WCT) adds a request to keep the
-    ECG from 30 s before to 30 s after it (take_recording_requests). The app
-    does the saving.
+    Every emergency alert (VF/VT, asystole, WCT) and every SVT alert
+    (fast_narrow) adds a request to keep the ECG from 30 s before to 30 s
+    after it (take_recording_requests). The app does the saving. For SVT the
+    doctor needs the strip to confirm it, and the 30 s before hold the start:
+    the alert comes 15 to 23 s into an abrupt run (synthetic SVT at 155 to
+    220 bpm, tests/test_fast_narrow_tracker.py).
 
 Naming VF or VT (off: config.VFVT_NAMING_ENABLED)
     From the beats of the last 10 s when ShockableNet fires: PVCs in a row
@@ -214,7 +221,7 @@ class RecordingRequest:
 
 
 # Alerts that ask for the ECG around them to be kept.
-RECORD_ON = ("VF/VT", "VF", "VT", "asystole", "WCT")
+RECORD_ON = ("VF/VT", "VF", "VT", "asystole", "WCT", "fast_narrow")
 
 
 def beats_from_mask(mask, t_start: float, fs: int = C.TARGET_FS) -> list:
@@ -456,6 +463,7 @@ class DecisionLayer:
                 outcome = "entered"
             elif self._tachy_told():
                 outcome = "entered: rate alert open"
+                self._keep_ecg(t, "fast_narrow")          # same episode: keep its ECG
             else:
                 outcome = "sent"
                 out.append(Alert(t, "fast_narrow", "warning", "fast_narrow",
@@ -637,13 +645,16 @@ class DecisionLayer:
             peak = {"t": t, "burden": b, "beats": n, "tier": tier(b)}
         return {"peak_hour": peak, "daily": daily}
 
+    def _keep_ecg(self, t: float, reason: str, shadow_name: str | None = None) -> RecordingRequest:
+        req = RecordingRequest(t, t - C.ECG_SAVE_BEFORE_SEC, t + C.ECG_SAVE_AFTER_SEC,
+                               reason, shadow_name)
+        self.recording_requests.append(req)
+        return req
+
     def _emit(self, out: list[Alert]) -> list[Alert]:
         for a in out:
             if a.kind in RECORD_ON:
-                req = RecordingRequest(a.t, a.t - C.ECG_SAVE_BEFORE_SEC,
-                                       a.t + C.ECG_SAVE_AFTER_SEC, a.kind,
-                                       a.evidence.get("shadow_name"))
-                self.recording_requests.append(req)
+                req = self._keep_ecg(a.t, a.kind, a.evidence.get("shadow_name"))
                 a.evidence["save_ecg"] = {"start": req.start, "end": req.end}
         self.alerts.extend(out)
         return out
