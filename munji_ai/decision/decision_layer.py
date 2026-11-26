@@ -7,6 +7,7 @@
     alerts = dl.on_rhythm(t, (p_nsr, p_af, p_other), usable=True, lead_off=False)
     alerts = dl.on_rate(t, rate_report, usable=True, lead_off=False, complete=True)
     alerts = dl.on_beats(t, beats_from_mask(mask, t_start), usable=p_usable >= 0.90)
+    alerts = dl.on_fast_narrow(tracker.push(chunk), usable=True, lead_off=False)
     summary = dl.report()            # AF burden and counts for the doctor's PDF
     saves = dl.take_recording_requests()   # ECG strips the app should keep
 
@@ -92,8 +93,31 @@ Priority
 
     The engine no longer names a fast rhythm narrow (SVT) or wide: its width
     estimate failed on the QT Database. Ventricular rhythms come from the
-    ventricular-beat detector. If the SVT label returns, it stays held while
-    ShockableNet saw danger in the last 6 windows (ventricular_hold).
+    ventricular-beat detector, and the fast narrow (SVT) label from the
+    fast narrow tracker (below). It stays held while ShockableNet saw danger
+    in the last 6 windows (ventricular_hold).
+
+Fast narrow rhythm (rules/fast_narrow.FastNarrowTracker, every 2.5 s)
+    The tracker compares every beat with the patient's own (a template from
+    patch-on) and sends events; docs/fast_narrow_rhythm.md has the rules,
+    their basis and the results. on_fast_narrow takes them:
+
+        "alert"     a sudden fast regular rhythm with the usual beat shape:
+                    alert "fast_narrow", warning ("possible SVT"). The tracker
+                    already sends one per episode.
+        "report"    an entry in the doctor's report, never an alert. It may
+                    come minutes after its time: the tracker waits for the
+                    run to end, to see whether it ended abruptly.
+        "template"  not for this layer: the app stores it on the phone.
+
+    Held, and counted (report()["fast_narrow"]), when:
+      ShockableNet saw danger in the last 6 windows (ventricular_hold): a
+        rhythm that might be VT is never named SVT;
+      the window is not usable or the leads are off: the rule counts beats,
+        and noise invents beats (as for the rate findings);
+      for the alert only, a sustained-tachycardia notification (180 held
+        30 s) is open: the person has already been told about this fast
+        heartbeat, so it goes to the report instead of paging twice.
 
 Beats (BeatSegmenter, every beat window)
     Each beat arrives as (time in seconds, "N" | "PAC" | "PVC");
@@ -278,6 +302,8 @@ class DecisionLayer:
         self._vt_last_true = -np.inf
         self.recording_requests: list = []
         self._recordings_taken = 0
+        # fast narrow rhythm: every event the tracker sent, and what became of it
+        self.fast_narrow_log: list = []       # (t, kind, outcome, info)
 
     # ---------------------------------------------------------------- inputs
     def on_shockable(self, t: float, p_shockable: float, rate=None,
@@ -412,6 +438,38 @@ class DecisionLayer:
             self._beats.popleft()
         self._update_hour_burden()
         return self._emit(self._vt_check(t))
+
+    def on_fast_narrow(self, events, usable: bool = True,
+                       lead_off: bool | None = None) -> list[Alert]:
+        """Events from FastNarrowTracker (anything with .kind, .t and .info).
+        usable: the gate accepted the window they belong to; lead_off as on_rate."""
+        out = []
+        for e in events:
+            kind, t, info = e.kind, float(e.t), dict(getattr(e, "info", {}) or {})
+            if kind not in ("alert", "report"):
+                continue                                  # "template": the app stores it
+            if "fast_narrow" in self.cfg.ventricular_hold and self.ventricular_activity():
+                outcome = "held: ventricular"
+            elif lead_off is True or not usable:
+                outcome = "held: signal"
+            elif kind == "report":
+                outcome = "entered"
+            elif self._tachy_told():
+                outcome = "entered: rate alert open"
+            else:
+                outcome = "sent"
+                out.append(Alert(t, "fast_narrow", "warning", "fast_narrow",
+                                 "fast regular heartbeat with the usual beat shape (possible SVT); "
+                                 "a doctor should confirm on an ECG",
+                                 {k: _num(info.get(k)) for k in ("bpm", "onset_drop", "rate_before",
+                                                                 "regular_ms", "lorenz", "share")}))
+            self.fast_narrow_log.append((t, kind, outcome, info))
+        return self._emit(out)
+
+    def _tachy_told(self) -> bool:
+        """A sustained-tachycardia notification is open (sent, episode not over)."""
+        ep = self._rate.get("tachy")
+        return bool(ep is not None and ep.active and "tachy" in self._rate_level)
 
     def take_recording_requests(self) -> list:
         """Recording requests not yet handed to the app."""
@@ -554,7 +612,16 @@ class DecisionLayer:
                 "trigeminy_episodes": self.patterns["trigeminy"],
                 "recording_requests": [(r.t, r.start, r.end, r.reason, r.shadow_name)
                                        for r in self.recording_requests],
+                "fast_narrow": self._fast_narrow_report(),
                 "alerts": [(a.t, a.kind, a.severity) for a in self.alerts]}
+
+    def _fast_narrow_report(self) -> dict:
+        """For the doctor: every alert sent and every entry, with its numbers,
+        and how many events were held."""
+        log = self.fast_narrow_log
+        return {"alerts": [(t, info) for t, k, o, info in log if k == "alert" and o == "sent"],
+                "entries": [(t, info) for t, k, o, info in log if o.startswith("entered")],
+                "held": sum(o.startswith("held") for _, _, o, _ in log)}
 
     def _burden_report(self) -> dict:
         def tier(b):
@@ -580,6 +647,15 @@ class DecisionLayer:
                 a.evidence["save_ecg"] = {"start": req.start, "end": req.end}
         self.alerts.extend(out)
         return out
+
+
+def _num(v):
+    """A plain float for the alert's evidence; None for NaN or missing."""
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    return f if np.isfinite(f) else None
 
 
 # what each name of a ShockableNet alert tells the person

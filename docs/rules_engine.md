@@ -81,6 +81,8 @@ baseline depends on it.
   estimate failed on the QT Database (7,246 beats): mean -50 ms, SD 35 ms
   against IEC 60601-2-25 limits of +/-10 ms and 10 ms, correlation 0.25.
   QRS width is still reported as narrow, uncertain or wide, for information.
+  The SVT label now comes from the patient's own beat shape, outside the
+  engine: `rules/fast_narrow.py`, `docs/fast_narrow_rhythm.md`.
 
 ## Input contract
 

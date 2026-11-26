@@ -396,6 +396,51 @@ def main() -> int:
     out = shock(dl, 22.5)
     check("with naming on, the same case is alerted as 'VT'", kinds(out) == ["VT"], str(kinds(out)))
 
+    print("\nFast narrow rhythm (FastNarrowTracker events)\n")
+
+    def sevs(alerts):
+        return [(a.kind, a.severity) for a in alerts]
+
+    class Ev:                                   # what the tracker sends: kind, t, info
+        def __init__(self, kind, t, **info):
+            self.kind, self.t, self.info = kind, t, info
+
+    nums = {"bpm": 172.0, "onset_drop": 0.2, "rate_before": 80.0, "regular_ms": 8.0,
+            "lorenz": float("nan"), "share": 1.0}
+    dl = DecisionLayer()
+    out = dl.on_fast_narrow([Ev("template", 10.0), Ev("alert", 167.5, **nums), Ev("report", 167.5, **nums)])
+    check("an alert event: one 'fast_narrow' alert, a warning", sevs(out) == [("fast_narrow", "warning")], str(sevs(out)))
+    check("... its evidence carries the numbers, NaN as None",
+          out and out[0].evidence["bpm"] == 172.0 and out[0].evidence["lorenz"] is None, str(out[0].evidence if out else None))
+    r = dl.report()["fast_narrow"]
+    check("a report event is an entry, never an alert; a template event is not this layer's",
+          len(r["alerts"]) == 1 and [t for t, _ in r["entries"]] == [167.5] and r["held"] == 0, str(r))
+    check("no ECG strip is asked for (not an emergency alert)", dl.take_recording_requests() == [])
+    dl = DecisionLayer()
+    out = dl.on_fast_narrow([Ev("report", 300.0, **nums)])
+    check("a late report event (the run had to end first) is entered with its own time",
+          out == [] and dl.report()["fast_narrow"]["entries"][0][0] == 300.0)
+    dl = DecisionLayer()
+    run_shock(dl, [0.9], chaotic())
+    out = dl.on_fast_narrow([Ev("alert", 5.0, **nums), Ev("report", 5.0, **nums)])
+    check("ShockableNet saw danger in the last 6 windows: alert and entry held (never SVT for a possible VT)",
+          out == [] and dl.report()["fast_narrow"] == {"alerts": [], "entries": [], "held": 2})
+    dl = DecisionLayer()
+    out = dl.on_fast_narrow([Ev("alert", 5.0, **nums)], usable=False)
+    out += dl.on_fast_narrow([Ev("alert", 50.0, **nums)], lead_off=True)
+    check("a window the gate rejects, or leads off: held", out == [] and dl.report()["fast_narrow"]["held"] == 2)
+    out = dl.on_fast_narrow([Ev("alert", 100.0, **nums)], usable=True, lead_off=None)
+    check("leads unknown, gate accepts: sent", kinds(out) == ["fast_narrow"])
+    dl = DecisionLayer()
+    told = run_rate(dl, [s_tachy] * 6)
+    out = dl.on_fast_narrow([Ev("alert", 20.0, **nums)])
+    r = dl.report()["fast_narrow"]
+    check("a sustained-tachycardia notification is open: no second page, the alert goes to the report",
+          kinds(told) == ["sustained_tachycardia"] and out == [] and len(r["entries"]) == 1 and not r["alerts"])
+    run_rate(dl, [rate()] * 6, t0=20.0)
+    out = dl.on_fast_narrow([Ev("alert", 60.0, **nums)])
+    check("once that episode is over, the alert is sent again", kinds(out) == ["fast_narrow"])
+
     print("\n" + ("ALL CHECKS PASSED" if ok else "FAILURES ABOVE"))
     return 0 if ok else 1
 

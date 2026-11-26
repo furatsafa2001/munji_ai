@@ -183,6 +183,21 @@ def pieces() -> None:
         check("a template at another fs is refused", True)
 
 
+def through_decision_layer() -> None:
+    """Tracker events into the decision layer, as the app chains them."""
+    from munji_ai.decision.decision_layer import DecisionLayer
+    print("through the decision layer")
+    for label, parts, seed, want in (("SVT at 180", F.SVT, 3, (1, 1)), ("sinus speeding up and slowing down", F.RAMP, 1, (0, 0))):
+        x, _, _ = F.ecg(parts, seed)
+        tr, dl, alerts = FastNarrowTracker(FS), DecisionLayer(), []
+        for i in range(0, len(x), FS):
+            alerts += dl.on_fast_narrow(tr.push(x[i:i + FS]))
+        alerts += dl.on_fast_narrow(tr.finish())
+        r = dl.report()["fast_narrow"]
+        got = (sum(a.kind == "fast_narrow" for a in alerts), len(r["entries"]))
+        check(f"{label}: fast_narrow alerts and report entries {want}", got == want, str(got))
+
+
 def real(keys) -> None:
     from munji_ai.data.loader import load_record
     print("real records (when on disk)")
@@ -209,6 +224,7 @@ def main(argv=None) -> int:
     a = ap.parse_args(argv)
     pieces()
     synthetic()
+    through_decision_layer()
     real(a.records)
     print("\nALL CHECKS PASSED" if ok else "\nSOME CHECKS FAILED")
     return 0 if ok else 1

@@ -38,7 +38,8 @@ Wide-complex tachycardia is not reported: on real VT this engine called only
 14% of windows wide. The "fast narrow" (SVT) label is off as well
 (config.FAST_NARROW_LABEL): the width estimate failed against hand-measured
 QRS on the QT Database. Width is still measured and reported as narrow,
-uncertain or wide, for information only.
+uncertain or wide, for information only. The SVT label now comes from the
+patient's own beat shape instead: rules/fast_narrow.py.
 
 Input
 -----

@@ -7,7 +7,9 @@ need the client's physician to sign them off.
 
 Code: `experiments/fast_narrow_template.py` (rows `FINAL_ALERT` and
 `FINAL_REPORT`), with `experiments/fast_narrow_exercise.py` and
-`experiments/fast_narrow_icentia.py` for exercise and daily life.
+`experiments/fast_narrow_icentia.py` for exercise and daily life. In the app
+code: `rules/beat_match.py`, `rules/fast_narrow.py` and
+`DecisionLayer.on_fast_narrow` (see "In the app code").
 
 ## What it is
 
@@ -186,13 +188,59 @@ that applies.
   150 in the annotations; likely a detector over-count, not yet checked by
   eye.
 
+## In the app code
+
+| Piece | What it does |
+|---|---|
+| `munji_ai/rules/beat_match.py` | The patient's own beat: learnt at patch-on (the first 10 s at 40 to 100 bpm with one main shape), and how much every beat looks like it. `Template.to_dict` and `from_dict` keep it on the phone; a stored template of another version or fs is refused. Moved unchanged from `experiments/template_wct.py`. |
+| `munji_ai/rules/fast_narrow.py` | `FastNarrowTracker`: push the signal in chunks of any size, get events: `alert`, `report`, and `template` once it is learnt. |
+| `DecisionLayer.on_fast_narrow` | Turns the events into the alert `fast_narrow` (warning, "possible SVT") and the report entries (`report()["fast_narrow"]`). |
+
+**What the tracker keeps between windows.** The rate engine reads every 40 s
+window on its own; these rules need memory: the template, the last 3 minutes
+of beats (the Lorenz score reads 2 minutes), the runs over 100 and over 150
+in progress (where each started, how sharply, the app's rate just before),
+and the last 2 minutes of decisions.
+
+**Timing.**
+- A window is decided one stride (2.5 s) later, once the samples after its
+  last beat have arrived: a beat's shape needs the 140 ms after it.
+- A report entry whose run did not start abruptly waits for the run to end,
+  to see whether it ended abruptly. It can come minutes late, always with its
+  own time.
+
+**The template** is learnt once per wear and kept on the phone: a restarted
+app must not learn a new one, perhaps during an arrhythmia. A new patch
+learns a new one. Until it exists, nothing is decided. A guarded update
+(slow, regular, clean, close to the old one, never during or right after an
+episode), as ICDs do, is a later improvement that needs multi-day data.
+
+**The decision layer holds** an event, and counts it, while ShockableNet saw
+danger in the last 6 windows (a possible VT is never named SVT), or when the
+window is not usable or the leads are off (noise invents beats). It does not
+page twice for one fast heartbeat: while a sustained-tachycardia
+notification (180 held 30 s) is open, the alert goes to the report instead.
+
+**Checked against the experiment** (`tests/test_beat_match.py`,
+`tests/test_fast_narrow_tracker.py`): the same template, the same alerts and
+the same report entries at the same times, on 14 synthetic records (template
+given or learnt, any chunk size) and on real ones: SHDB-AF 127 (8 alerts,
+42 entries), LTAFDB 42 (13, 19), LTAFDB 204 (0, 0), CUDB cu01, VFDB 426 and
+607. One difference by design: the experiment applied its template to the
+beats before it as well; the tracker cannot see the future.
+
+**Not yet:** the quality gate's effect on these events was never measured
+(the experiments ran without it); it can only hold events back. The Dart
+port in the app, and the call from the app's pipeline.
+
 ## Open
 
 1. The client's physician signs off the thresholds: 180 bpm held 30 s for
    the notification (MCOT is a service protocol, not a society guideline;
    ARIC used over 180 for 60 s), 150 bpm for the alert and the report.
-2. Port both rules into the app's rate rules. `config.FAST_NARROW_LABEL`
-   is still False.
+2. The Dart port and the pipeline call (see "In the app code").
+   `config.FAST_NARROW_LABEL` stays False: it is the rate engine's old
+   width label, replaced by the tracker.
 3. The end-to-end test on the test split, once, with all models.
 4. Later: a "palpitations" button in the app (SVT usually comes with
    palpitations), a note on abrupt start and end in the report entry, the
@@ -207,6 +255,7 @@ python experiments/fast_narrow_exercise.py --download           # once, then wit
 python -m munji_ai.data.svt_runs                                # once, for Icentia
 python experiments/fast_narrow_icentia.py --workers 4           # about 80 min
 python experiments/doctor_vt_check.py --plot                    # the 9 unsafe entries of the earlier row
+python tests/test_fast_narrow_tracker.py --records shdbaf:127 ltafdb:42 ltafdb:204   # tracker = experiment
 ```
 
 ## References

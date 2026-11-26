@@ -459,10 +459,12 @@ NOTIFY_BRADY_URGENT_BPM = 40       # strictly below, held NOTIFY_SUSTAIN_SEC
 NOTIFY_BRADY_EMERGENT_BPM = 30     # at or below, held NOTIFY_SUSTAIN_SEC
 NOTIFY_TACHY_URGENT_BPM = 180      # at or above, held NOTIFY_SUSTAIN_SEC
 
-# The "fast narrow" (SVT) label rests on the QRS width estimate, which failed
-# against hand-measured QRS on the QT Database: mean -50 ms, SD 35 ms against
-# IEC 60601-2-25 limits of +/-10 ms and 10 ms, correlation 0.25. Off until a
-# width source passes. A fast rhythm is still reported and notified by rate.
+# The rate engine's own "fast narrow" (SVT) label rests on the QRS width
+# estimate, which failed against hand-measured QRS on the QT Database: mean
+# -50 ms, SD 35 ms against IEC 60601-2-25 limits of +/-10 ms and 10 ms,
+# correlation 0.25. It stays off. The SVT label now comes from
+# rules/fast_narrow.py (the patient's own beat shape, not width), through
+# DecisionLayer.on_fast_narrow: docs/fast_narrow_rhythm.md.
 FAST_NARROW_LABEL = False
 
 # Windows the rate engine runs on, derived from the definitions above, not
